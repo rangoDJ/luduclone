@@ -46,8 +46,21 @@ def current_user(authorization: Optional[str] = Header(default=None)) -> str:
 
 
 # --------------------------------------------------------------------------
-# Health + manifest
+# Root + health + manifest
 # --------------------------------------------------------------------------
+@app.get("/")
+def root() -> dict:
+    """Service info, so hitting the base URL isn't a bare 404."""
+    return {
+        "service": "luduclone",
+        "version": app.version,
+        "auth": "open" if config.auth_open else "token",
+        "endpoints": ["/health", "/manifest", "/games",
+                      "/games/{game}/saves", "/docs"],
+        "docs": "/docs",
+    }
+
+
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok", "auth": "open" if config.auth_open else "token"}
