@@ -111,6 +111,15 @@ def list_games(user: str = Depends(current_user)) -> dict:
     return {"games": store.list_games(user)}
 
 
+@app.delete("/games/{game}")
+def delete_game(game: str, user: str = Depends(current_user)) -> dict:
+    """Remove all backups of a game for this user (e.g. to clear a bad upload)."""
+    removed = store.delete_game(user, game)
+    if removed == 0:
+        raise HTTPException(404, "No backups for this game")
+    return {"game": game, "deleted_versions": removed}
+
+
 @app.get("/games/{game}/saves")
 def list_saves(game: str, user: str = Depends(current_user)) -> dict:
     versions = [r.to_public() for r in store.list_versions(user, game)]

@@ -32,6 +32,8 @@ UI_HTML = """<!doctype html>
   .versions { font-size: 13px; opacity: 0.85; }
   .pill { display: inline-block; padding: 1px 8px; border-radius: 999px;
           background: #8882; font-size: 12px; }
+  button.del { padding: 0 7px; opacity: 0.55; line-height: 1.6; }
+  button.del:hover { opacity: 1; border-color: #e66; color: #e66; }
   #status { margin-left: auto; font-size: 13px; }
   .empty { opacity: 0.6; padding: 24px 0; }
 </style>
@@ -85,20 +87,39 @@ function render(games) {
   const c = $("#content");
   if (!games.length) { c.innerHTML = '<p class="empty">No backups uploaded yet.</p>'; return; }
   let html = '<table><thead><tr><th>Game</th><th>Versions</th><th>Latest</th>' +
-             '<th>Last updated</th></tr></thead><tbody>';
+             '<th>Last updated</th><th></th></tr></thead><tbody>';
   for (const g of games) {
-    html += `<tr class="game" data-game="${encodeURIComponent(g.game)}">` +
+    const gid = encodeURIComponent(g.game);
+    html += `<tr class="game" data-game="${gid}">` +
             `<td>${escapeHtml(g.game)}</td>` +
             `<td><span class="pill">${g.versions}</span></td>` +
             `<td>v${g.latest}</td>` +
-            `<td>${fmtTime(g.updated)}</td></tr>` +
-            `<tr class="detail" hidden><td colspan="4" class="versions">…</td></tr>`;
+            `<td>${fmtTime(g.updated)}</td>` +
+            `<td><button class="del" data-game="${gid}" data-name="${escapeHtml(g.game)}"` +
+            ` title="Delete all backups">✕</button></td></tr>` +
+            `<tr class="detail" hidden><td colspan="5" class="versions">…</td></tr>`;
   }
   html += "</tbody></table>";
   c.innerHTML = html;
   c.querySelectorAll("tr.game").forEach((row) => {
-    row.addEventListener("click", () => toggle(row));
+    row.addEventListener("click", (e) => {
+      if (e.target.classList.contains("del")) return;  // handled separately
+      toggle(row);
+    });
   });
+  c.querySelectorAll("button.del").forEach((b) => {
+    b.addEventListener("click", (e) => { e.stopPropagation(); del(b); });
+  });
+}
+
+async function del(btn) {
+  const game = btn.getAttribute("data-game");
+  const name = btn.getAttribute("data-name");
+  if (!confirm(`Delete ALL backups for "${name}"? This cannot be undone.`)) return;
+  btn.disabled = true;
+  const r = await fetch(`games/${game}`, { method: "DELETE", headers: headers() });
+  if (!r.ok && r.status !== 404) { $("#status").textContent = "delete failed " + r.status; btn.disabled = false; return; }
+  load();
 }
 
 async function toggle(row) {

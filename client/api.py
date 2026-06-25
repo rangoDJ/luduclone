@@ -51,6 +51,11 @@ class ApiClient:
         r.raise_for_status()
         return r.json()["games"]
 
+    def delete_game(self, game: str) -> dict:
+        r = self.session.delete(self._url(f"/games/{game}"), timeout=30)
+        r.raise_for_status()
+        return r.json()
+
     def upload(self, game: str, bundle_path: Path, source_os: str, mapping: dict) -> dict:
         with open(bundle_path, "rb") as f:
             r = self.session.post(

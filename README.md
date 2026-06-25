@@ -80,6 +80,7 @@ uvicorn server.app:app --reload
 | GET    | `/games`                          | Games with backups for this user     |
 | GET    | `/games/{game}/saves`             | List versions                        |
 | POST   | `/games/{game}/saves`             | Upload bundle (multipart) + mapping  |
+| DELETE | `/games/{game}`                   | Delete all backups of a game         |
 | GET    | `/games/{game}/saves/latest`      | Download newest bundle               |
 | GET    | `/games/{game}/saves/{version}`   | Download specific version            |
 

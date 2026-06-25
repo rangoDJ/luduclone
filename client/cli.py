@@ -119,6 +119,20 @@ def cmd_restore(args) -> int:
     return 1 if any_fail else 0
 
 
+def cmd_forget(args) -> int:
+    cfg = ClientConfig.load(args.server, args.token)
+    api = ApiClient(cfg)
+    rc = 0
+    for name in args.game:
+        try:
+            resp = api.delete_game(name)
+            print(f"  forgot {name} ({resp['deleted_versions']} version(s))")
+        except Exception as e:  # noqa: BLE001
+            print(f"  {name}: {e}", file=sys.stderr)
+            rc = 1
+    return rc
+
+
 def cmd_prefixes(args) -> int:
     from . import steam
     libs = steam.library_dirs()
@@ -189,6 +203,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     r = sub.add_parser("remote", help="List games backed up on the server")
     r.set_defaults(func=cmd_remote)
+
+    fg = sub.add_parser("forget", help="Delete a game's backups from the server")
+    fg.add_argument("game", nargs="+", help="Game name(s) to delete")
+    fg.set_defaults(func=cmd_forget)
     return p
 
 

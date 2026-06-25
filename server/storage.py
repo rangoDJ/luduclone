@@ -153,3 +153,22 @@ class Store:
 
     def abs_path(self, rec: SaveRecord) -> Path:
         return self.data_dir / rec.path
+
+    # ----- deletes ------------------------------------------------------
+    def delete_game(self, user: str, game: str) -> int:
+        """Delete all versions of a game for a user, including bundle files.
+        Returns the number of versions removed."""
+        import shutil
+
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM saves WHERE user=? AND game=?",
+                (user, game),
+            ).fetchone()
+            count = row["n"] or 0
+            if count:
+                conn.execute("DELETE FROM saves WHERE user=? AND game=?", (user, game))
+        bundle_dir = self.saves_dir / _slug(user) / _slug(game)
+        if bundle_dir.exists():
+            shutil.rmtree(bundle_dir, ignore_errors=True)
+        return count

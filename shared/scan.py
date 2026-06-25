@@ -20,6 +20,21 @@ class Match:
     rel_path: str         # abs_path relative to base, using forward slashes
 
 
+def _is_absolute(resolved: str) -> bool:
+    """True if the pattern is anchored to an absolute location.
+
+    Handles both OSes regardless of host: a Windows drive path (``C:/...``), a
+    POSIX absolute path (``/...``), or a UNC path (``//host/share``). A leading
+    wildcard segment (``*/...``) is treated as relative.
+    """
+    if resolved.startswith("/"):
+        return True
+    # Drive-letter path like C:/ or C:\
+    if len(resolved) >= 3 and resolved[1] == ":" and resolved[2] in "/\\":
+        return True
+    return False
+
+
 def _literal_prefix(resolved: str) -> str:
     """Return the leading portion of the pattern before the first wildcard."""
     cut = len(resolved)
@@ -38,7 +53,15 @@ def scan(resolved: str) -> list[Match]:
     """Expand a resolved template to concrete files.
 
     Directories are walked recursively into their constituent files.
+
+    Patterns that are not absolute paths are ignored. These come from templates
+    built on ``<base>``/``<root>`` (the game's install dir) when no game root is
+    configured: they collapse to a relative glob like ``*/*/data`` that would
+    otherwise match arbitrary folders relative to the process's working
+    directory -- the source of "phantom" matches for games that aren't installed.
     """
+    if not _is_absolute(resolved):
+        return []
     base = Path(_literal_prefix(resolved))
     out: list[Match] = []
     for hit in glob.glob(resolved, recursive=True):
