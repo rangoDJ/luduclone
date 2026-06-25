@@ -8,9 +8,10 @@ Self-hosted game-save sync, **Windows → Linux**, built on the
 [ludusavi manifest](https://github.com/mtkennerly/ludusavi-manifest).
 
 > **Prebuilt artifacts:** CI publishes the server image to
-> `ghcr.io/rangodj/luduclone:latest` and builds `luduclone.exe` (download from
-> the latest [windows-client run](https://github.com/rangoDJ/luduclone/actions/workflows/windows-client.yml),
-> or attached to tagged releases).
+> `ghcr.io/rangodj/luduclone:latest` and builds `luduclone.exe` (CLI) +
+> `luduclone-gui.exe` (GUI) — download from the latest
+> [windows-client run](https://github.com/rangoDJ/luduclone/actions/workflows/windows-client.yml),
+> or from tagged releases.
 
 A Docker-based server is the hub; thin clients on each OS back up saves locally,
 upload them, and download them on the other machine for restore. Windows-only
@@ -60,6 +61,9 @@ curl localhost:8000/health
 curl -H "Authorization: Bearer supersecret" localhost:8000/manifest | head
 ```
 
+Open **http://localhost:8000/ui** in a browser for a dashboard of uploaded games
+and their versions (enter your token in the field; leave blank for open auth).
+
 Local dev without Docker:
 
 ```bash
@@ -98,6 +102,15 @@ python -m client remote               # list what's backed up on the server
 `scan`/`backup` walk the whole manifest by default to discover installed games;
 use `--game` (repeatable) to narrow it. Each upload records *which placeholder*
 each file came from, so the Linux side can retarget it.
+
+Prefer a window over the terminal? Run the GUI:
+
+```bash
+python -m client.gui        # or just run luduclone-gui.exe
+```
+
+It exposes the same Scan / Back up & upload / Server games actions with fields
+for the server URL and token.
 
 ## Restore on Steam Deck / Linux (Proton)
 

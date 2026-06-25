@@ -19,12 +19,13 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, UploadFile, Form, File
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 
 from shared import manifest as manifest_mod
 
 from .config import config
 from .storage import Store
+from .web import UI_HTML
 
 app = FastAPI(title="luduclone", version="0.1.0")
 store = Store(config.DATA_DIR)
@@ -55,10 +56,18 @@ def root() -> dict:
         "service": "luduclone",
         "version": app.version,
         "auth": "open" if config.auth_open else "token",
-        "endpoints": ["/health", "/manifest", "/games",
+        "endpoints": ["/ui", "/health", "/manifest", "/games",
                       "/games/{game}/saves", "/docs"],
+        "ui": "/ui",
         "docs": "/docs",
     }
+
+
+@app.get("/ui", response_class=HTMLResponse)
+def ui() -> str:
+    """A simple dashboard listing uploaded games. Auth happens client-side via a
+    token field (works for both open- and token-auth servers)."""
+    return UI_HTML
 
 
 @app.get("/health")
