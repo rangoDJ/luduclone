@@ -1,0 +1,45 @@
+name: windows-client
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write  # needed to attach the exe to releases on tag pushes
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The client only needs requests + pyyaml at runtime; keep the exe lean.
+      - name: Install build deps
+        run: pip install requests PyYAML pyinstaller
+
+      - name: Build luduclone.exe
+        run: >
+          pyinstaller --onefile --console --name luduclone
+          --collect-submodules client --collect-submodules shared
+          luduclone.py
+
+      - name: Sanity check the exe
+        run: ./dist/luduclone.exe --help
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: luduclone-windows
+          path: dist/luduclone.exe
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/luduclone.exe

@@ -1,7 +1,16 @@
 # luduclone
 
+[![docker](https://github.com/rangoDJ/luduclone/actions/workflows/docker.yml/badge.svg)](https://github.com/rangoDJ/luduclone/actions/workflows/docker.yml)
+[![windows-client](https://github.com/rangoDJ/luduclone/actions/workflows/windows-client.yml/badge.svg)](https://github.com/rangoDJ/luduclone/actions/workflows/windows-client.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Self-hosted game-save sync, **Windows → Linux**, built on the
 [ludusavi manifest](https://github.com/mtkennerly/ludusavi-manifest).
+
+> **Prebuilt artifacts:** CI publishes the server image to
+> `ghcr.io/rangodj/luduclone:latest` and builds `luduclone.exe` (download from
+> the latest [windows-client run](https://github.com/rangoDJ/luduclone/actions/workflows/windows-client.yml),
+> or attached to tagged releases).
 
 A Docker-based server is the hub; thin clients on each OS back up saves locally,
 upload them, and download them on the other machine for restore. Windows-only
@@ -31,7 +40,11 @@ Linux side can retarget it correctly instead of trusting raw `C:\` paths.
 ## Run the server
 
 ```bash
-# Open auth (dev only — anyone is user "default"):
+# Use the prebuilt image from GHCR:
+docker run -d -p 8000:8000 -v luduclone-data:/data \
+  -e LUDUCLONE_TOKENS="rango:supersecret" ghcr.io/rangodj/luduclone:latest
+
+# ...or build locally with open auth (dev only — anyone is user "default"):
 docker compose up --build
 
 # With tokens:
