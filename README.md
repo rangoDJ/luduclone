@@ -40,15 +40,17 @@ Linux side can retarget it correctly instead of trusting raw `C:\` paths.
 ## Run the server
 
 ```bash
-# Use the prebuilt image from GHCR:
+# Pull + run the published image (docker-compose.yml uses ghcr.io by default):
+LUDUCLONE_TOKENS="rango:supersecret" docker compose up -d
+
+# Leave LUDUCLONE_TOKENS unset for OPEN auth (dev only — anyone is user "default").
+
+# Build from source instead of pulling (local development):
+docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
+
+# Or a plain one-off container:
 docker run -d -p 8000:8000 -v luduclone-data:/data \
   -e LUDUCLONE_TOKENS="rango:supersecret" ghcr.io/rangodj/luduclone:latest
-
-# ...or build locally with open auth (dev only — anyone is user "default"):
-docker compose up --build
-
-# With tokens:
-LUDUCLONE_TOKENS="rango:supersecret" docker compose up --build
 ```
 
 Then:

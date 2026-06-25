@@ -1,0 +1,9 @@
+# Override for local development: build the image from source instead of
+# pulling it from GHCR. Use together with the base compose file:
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up --build
+services:
+  luduclone:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    image: ghcr.io/rangodj/luduclone:latest
