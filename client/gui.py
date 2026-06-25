@@ -26,6 +26,7 @@ class App:
 
         self._log_q: queue.Queue[str] = queue.Queue()
         self._busy = False
+        self._prog: tuple[int, int, str] | None = None  # (current, total, label)
 
         # Pre-fill from saved config / env if present.
         server, token = "", ""
@@ -79,7 +80,14 @@ class App:
         self.remote_btn.pack(side="left")
         ttk.Button(btns, text="Clear log", command=self.clear_log).pack(side="right")
 
-        self.log = tk.Text(root, height=18, wrap="word", state="disabled")
+        prog = ttk.Frame(root)
+        prog.pack(fill="x", **pad)
+        self.progress = ttk.Progressbar(prog, mode="determinate", maximum=100)
+        self.progress.pack(side="left", fill="x", expand=True)
+        self.prog_label = ttk.Label(prog, text="", width=26, anchor="w")
+        self.prog_label.pack(side="left", padx=8)
+
+        self.log = tk.Text(root, height=16, wrap="word", state="disabled")
         self.log.pack(fill="both", expand=True, padx=8, pady=(4, 4))
 
         self.status = ttk.Label(root, text="Ready", anchor="w", relief="sunken")
@@ -99,7 +107,29 @@ class App:
                 self.log.configure(state="disabled")
         except queue.Empty:
             pass
+        self._update_progress()
         self.root.after(100, self._drain_log)
+
+    # ---- progress (thread-safe via a single shared tuple) --------------
+    def set_progress(self, current: int, total: int, label: str) -> None:
+        self._prog = (current, total, label)
+
+    def reset_progress(self) -> None:
+        self._prog = None
+
+    def _update_progress(self) -> None:
+        p = self._prog
+        if p is None:
+            self.progress["value"] = 0
+            self.prog_label.configure(text="")
+            return
+        current, total, label = p
+        if total > 0:
+            pct = max(0, min(100, 100 * current / total))
+            self.progress["value"] = pct
+            self.prog_label.configure(text=f"{label}  {pct:.0f}%")
+        else:
+            self.prog_label.configure(text=label)
 
     def clear_log(self) -> None:
         self.log.configure(state="normal")
@@ -142,6 +172,7 @@ class App:
                 self.log_line(f"ERROR: {e}")
             finally:
                 self._busy = False
+                self.reset_progress()
                 self.root.after(0, lambda: self._toggle_buttons(True))
                 self.root.after(0, lambda: self.set_status("Ready"))
 
@@ -155,8 +186,11 @@ class App:
     def _load_manifest(self, cfg: ClientConfig):
         api = ApiClient(cfg)
         if self.refresh_var.get() or not cfg.manifest_cache.exists():
-            self.log_line("Fetching manifest from server…")
-            api.fetch_manifest()
+            self.log_line("Downloading manifest from server…")
+            api.fetch_manifest(
+                progress=lambda done, total: self.set_progress(
+                    done, total, "Downloading manifest"))
+            self.log_line("Manifest ready.")
         manifest = manifest_mod.Manifest.from_yaml(
             cfg.manifest_cache.read_text(encoding="utf-8"))
         return api, manifest
@@ -180,9 +214,10 @@ class App:
     def _scan(self, cfg: ClientConfig) -> None:
         api, manifest = self._load_manifest(cfg)
         env = detect_env()
-        self.log_line(f"Scanning {len(manifest)} games on {env.os}… (this can take a moment)")
+        self.log_line(f"Scanning {len(manifest)} games on {env.os}…")
         report = run_backup(api, manifest, env, tags=self._tags(),
-                            only=self._only(), dry_run=True)
+                            only=self._only(), dry_run=True,
+                            progress=lambda i, t, n: self.set_progress(i, t, "Scanning"))
         if not report:
             self.log_line("No save data found on this machine.")
             return
@@ -200,7 +235,8 @@ class App:
         api, manifest = self._load_manifest(cfg)
         env = detect_env()
         self.log_line(f"Backing up from {env.os}…")
-        report = run_backup(api, manifest, env, tags=self._tags(), only=self._only())
+        report = run_backup(api, manifest, env, tags=self._tags(), only=self._only(),
+                            progress=lambda i, t, n: self.set_progress(i, t, "Backing up"))
         uploaded = [r for r in report if r["status"] == "uploaded"]
         for r in sorted(uploaded, key=lambda r: r["game"]):
             reg = f"  +{r['registry']} reg" if r.get("registry") else ""

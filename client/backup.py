@@ -51,12 +51,18 @@ def scan_games(manifest: Manifest, env: ph.Env, tags: Iterable[str] = DEFAULT_TA
 
 def run_backup(api: ApiClient, manifest: Manifest, env: ph.Env,
                tags: Iterable[str] = DEFAULT_TAGS, only: list[str] | None = None,
-               dry_run: bool = False) -> list[dict]:
-    """Back up matching games and upload each. Returns a per-game report."""
+               dry_run: bool = False, progress=None) -> list[dict]:
+    """Back up matching games and upload each. Returns a per-game report.
+
+    ``progress`` is an optional callback ``(index, total, game_name)`` invoked
+    once per game scanned (useful for a progress bar over the full manifest)."""
     report: list[dict] = []
     names = only or list(manifest.games.keys())
+    total = len(names)
     with tempfile.TemporaryDirectory() as tmp:
-        for name in names:
+        for i, name in enumerate(names, 1):
+            if progress:
+                progress(i, total, name)
             if name not in manifest:
                 report.append({"game": name, "status": "unknown-game"})
                 continue

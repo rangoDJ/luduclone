@@ -15,6 +15,8 @@ import hashlib
 import json
 import os
 import tempfile
+import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -27,7 +29,26 @@ from .config import config
 from .storage import Store
 from .web import UI_HTML
 
-app = FastAPI(title="luduclone", version="0.1.0")
+
+def _warm_manifest() -> None:
+    """Pre-fetch/refresh the manifest cache so the first client isn't blocked
+    waiting on the GitHub download. Best-effort: failures are ignored (the
+    /manifest route will retry on demand)."""
+    try:
+        manifest_mod.load(config.manifest_cache, max_age_seconds=config.MANIFEST_MAX_AGE)
+    except Exception:
+        pass
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # Warm the manifest in the background so startup (and the health check) is
+    # never blocked by a slow network fetch.
+    threading.Thread(target=_warm_manifest, daemon=True).start()
+    yield
+
+
+app = FastAPI(title="luduclone", version="0.1.1", lifespan=lifespan)
 store = Store(config.DATA_DIR)
 
 

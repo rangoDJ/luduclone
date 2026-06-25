@@ -25,13 +25,26 @@ class ApiClient:
         r.raise_for_status()
         return r.json()
 
-    def fetch_manifest(self) -> str:
-        """Download the manifest from the server and cache it locally."""
-        r = self.session.get(self._url("/manifest"), timeout=120)
-        r.raise_for_status()
+    def fetch_manifest(self, progress=None) -> str:
+        """Download the manifest from the server and cache it locally.
+
+        ``progress`` is an optional callback ``(downloaded_bytes, total_bytes)``
+        invoked as the body streams in; ``total_bytes`` is 0 if unknown.
+        """
+        with self.session.get(self._url("/manifest"), stream=True, timeout=120) as r:
+            r.raise_for_status()
+            total = int(r.headers.get("Content-Length") or 0)
+            done = 0
+            chunks: list[bytes] = []
+            for chunk in r.iter_content(chunk_size=16 * 1024):
+                chunks.append(chunk)
+                done += len(chunk)
+                if progress:
+                    progress(done, total)
+            text = b"".join(chunks).decode("utf-8")
         self.cfg.manifest_cache.parent.mkdir(parents=True, exist_ok=True)
-        self.cfg.manifest_cache.write_text(r.text, encoding="utf-8")
-        return r.text
+        self.cfg.manifest_cache.write_text(text, encoding="utf-8")
+        return text
 
     def list_games(self) -> list[dict]:
         r = self.session.get(self._url("/games"), timeout=30)
