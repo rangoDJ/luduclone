@@ -1,0 +1,6 @@
+# Normalize line endings to LF — the server runs in Linux containers and the
+# client runs on Steam Deck / Linux, so CRLF would break shell/Dockerfiles.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.gz binary

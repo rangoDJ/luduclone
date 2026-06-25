@@ -1,0 +1,20 @@
+services:
+  luduclone:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    image: luduclone:latest
+    container_name: luduclone
+    ports:
+      - "8000:8000"
+    volumes:
+      - luduclone-data:/data
+    environment:
+      # Comma-separated user:token pairs. Leave empty for OPEN auth (dev only).
+      # Example: "rango:supersecret,alice:hunter2"
+      LUDUCLONE_TOKENS: "${LUDUCLONE_TOKENS:-}"
+      LUDUCLONE_MANIFEST_MAX_AGE: "86400"
+    restart: unless-stopped
+
+volumes:
+  luduclone-data:
