@@ -148,9 +148,23 @@ automatically via `libraryfolders.vdf`.
 - [x] Phase 4 — Proton prefix re-rooting (Steam Deck restore)
 - [x] Phase 3 — native Linux-port restore (`--mode native`/auto)
 - [x] Phase 5a — Windows registry capture + Proton `user.reg`/`system.reg` import
-- [ ] Phase 5b — conflict/diff before overwrite, web UI, Lutris/Heroic prefixes, single-file client build
+- [x] Phase 6 — Steam roots: detect installed games + resolve `<base>`/`<root>`/`<game>`
+- [ ] Phase 5b — conflict/diff before overwrite, Lutris/Heroic/GOG roots, single-file client build
+
+### Steam roots / installed-game detection
+
+Like ludusavi, luduclone anchors install-dir saves to a real **root**. It parses
+every `appmanifest_*.acf` across all Steam libraries (internal + SD card; Steam
+path found via the Windows registry or default install dirs) to learn each
+installed game's install directory and Proton prefix. This is what lets `<base>`
+(the game's install folder) resolve correctly — on backup it finds those saves,
+and on restore it routes them back to the install dir while Windows paths go into
+the Proton prefix. Run `luduclone prefixes` to see detected libraries + games.
 
 ### Known limitations
+- Only **Steam** roots so far (covers the Steam Deck case). Lutris/Heroic/GOG
+  roots aren't enumerated yet, so `<base>` saves for non-Steam launchers are
+  skipped rather than mis-targeted.
 - If a save path contains `<storeUserId>` *inside* the save subtree, restore can't
   resolve a Steam user id on a fresh prefix — those entries are skipped with a
   `skipped-wildcard` note. Most AppData/Documents saves are unaffected.

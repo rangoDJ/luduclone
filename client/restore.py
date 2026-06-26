@@ -22,11 +22,12 @@ from pathlib import Path
 from shared import placeholders as ph
 from shared import registry as reg
 from shared.manifest import Manifest, Game
-from shared.scan import _literal_prefix
+from shared.scan import _literal_prefix, _is_absolute as _is_anchored
 
 from .api import ApiClient
 from . import bundle
 from . import steam
+from .roots import SteamIndex, InstalledGame
 
 _FIRST_TOKEN = re.compile(r"<[a-zA-Z]+>")
 
@@ -52,10 +53,14 @@ class RestoreResult:
 
 def restore_game(api: ApiClient, manifest: Manifest, game_name: str, *,
                  version: int | None = None, mode: str = "auto",
-                 dry_run: bool = False, do_registry: bool = True) -> RestoreResult:
+                 dry_run: bool = False, do_registry: bool = True,
+                 steam_index: SteamIndex | None = None) -> RestoreResult:
     if game_name not in manifest:
         return RestoreResult(game_name, "error", detail="not in manifest")
     game = manifest[game_name]
+    if steam_index is None:
+        steam_index = SteamIndex.build()
+    installed = steam_index.get(game.steam_id)
 
     with tempfile.TemporaryDirectory() as tmp:
         dest = Path(tmp) / "bundle.tar.gz"
@@ -68,20 +73,22 @@ def restore_game(api: ApiClient, manifest: Manifest, game_name: str, *,
         entries = meta.get("entries", [])
         reg_keys = [reg.RegKey.from_dict(d) for d in meta.get("registry", [])]
 
-        chosen, target = _decide_mode(game, mode)
+        chosen, target = _decide_mode(game, mode, installed)
         if chosen is None:
             return RestoreResult(game_name, "no-target", detail=target)
 
         if chosen == "proton":
             return _restore_proton(game, dest, entries, reg_keys, Path(target),
-                                   dry_run=dry_run, do_registry=do_registry)
-        return _restore_native(game, dest, entries, dry_run=dry_run)
+                                   installed, dry_run=dry_run, do_registry=do_registry)
+        return _restore_native(game, dest, entries, installed, dry_run=dry_run)
 
 
-def _decide_mode(game: Game, mode: str) -> tuple[str | None, str]:
+def _decide_mode(game: Game, mode: str,
+                 installed: InstalledGame | None) -> tuple[str | None, str]:
     """Return (mode, target). For proton, target is the pfx path; otherwise a
     human-readable note when no target is available."""
-    pfx = steam.compat_prefix(game.steam_id) if game.steam_id is not None else None
+    pfx = installed.prefix if installed and installed.prefix else (
+        steam.compat_prefix(game.steam_id) if game.steam_id is not None else None)
     has_native = bool(game.save_files("linux"))
 
     if mode == "proton":
@@ -101,10 +108,22 @@ def _decide_mode(game: Game, mode: str) -> tuple[str | None, str]:
                   "save path in manifest")
 
 
+def _root_args(installed: InstalledGame | None) -> dict:
+    """Resolver kwargs that anchor <base>/<root>/<game> to the install dir."""
+    if installed is None:
+        return {}
+    return {"root": installed.root, "game_install_dir": installed.install_name}
+
+
 def _restore_proton(game: Game, bundle_path: Path, entries, reg_keys, pfx: Path,
-                    *, dry_run: bool, do_registry: bool) -> RestoreResult:
+                    installed: InstalledGame | None, *, dry_run: bool,
+                    do_registry: bool) -> RestoreResult:
+    # Windows placeholders resolve into the prefix; <base>/<root>/<game> resolve
+    # into the game's real install dir on this device.
     env = ph.Env.for_proton_prefix(pfx)
-    outcomes = [_extract_to_template(bundle_path, e, e["template"], env, dry_run=dry_run)
+    rkw = _root_args(installed)
+    outcomes = [_extract_to_template(bundle_path, e, e["template"], env,
+                                     dry_run=dry_run, **rkw)
                 for e in entries]
 
     reg_files: list[str] = []
@@ -119,8 +138,10 @@ def _restore_proton(game: Game, bundle_path: Path, entries, reg_keys, pfx: Path,
                          entries=outcomes, registry_files=reg_files)
 
 
-def _restore_native(game: Game, bundle_path: Path, entries, *, dry_run: bool) -> RestoreResult:
+def _restore_native(game: Game, bundle_path: Path, entries,
+                    installed: InstalledGame | None, *, dry_run: bool) -> RestoreResult:
     env = ph.Env.detect_linux()
+    rkw = _root_args(installed)
     linux_entries = game.save_files("linux")
     outcomes: list[EntryOutcome] = []
     for e in entries:
@@ -129,7 +150,8 @@ def _restore_native(game: Game, bundle_path: Path, entries, *, dry_run: bool) ->
             outcomes.append(EntryOutcome(e["template"], None, len(e.get("files", [])),
                                          "skipped-unmatched"))
             continue
-        outcomes.append(_extract_to_template(bundle_path, e, target_tmpl, env, dry_run=dry_run))
+        outcomes.append(_extract_to_template(bundle_path, e, target_tmpl, env,
+                                             dry_run=dry_run, **rkw))
     status = "restored" if any(o.status == "restored" for o in outcomes) else "no-data"
     return RestoreResult(game.name, status, mode="native", target_root=str(env.home),
                          entries=outcomes)
@@ -155,10 +177,15 @@ def _suffix(template: str) -> str:
 
 
 def _extract_to_template(bundle_path: Path, entry: dict, template: str,
-                         env: ph.Env, *, dry_run: bool) -> EntryOutcome:
+                         env: ph.Env, *, dry_run: bool, root: str | None = None,
+                         game_install_dir: str | None = None) -> EntryOutcome:
     """Resolve ``template`` in ``env`` and extract the entry's files into it."""
-    resolved = ph.resolve(template, env)
+    resolved = ph.resolve(template, env, root=root, game_install_dir=game_install_dir)
     base = _literal_prefix(resolved)
+    if not _is_anchored(base):
+        # An unresolved <base>/<root> (game not installed here) -> can't target.
+        return EntryOutcome(entry["template"], None, len(entry.get("files", [])),
+                            "skipped-unmatched")
     if "*" in base:
         candidates = [Path(p) for p in glob.glob(base)]
         if len(candidates) == 1:

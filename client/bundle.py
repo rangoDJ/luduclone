@@ -47,10 +47,14 @@ class BundleResult:
 
 
 def build_game_bundle(game: Game, env: ph.Env, tags, out_path: Path,
-                      *, root: str | None = None, registry=None) -> BundleResult | None:
+                      *, root: str | None = None, install_dir: str | None = None,
+                      registry=None) -> BundleResult | None:
     """Scan a game's save locations and write a bundle. Returns None if nothing
     matched on disk (no save files AND no captured registry).
 
+    ``root``/``install_dir`` anchor ``<base>``/``<root>``/``<game>`` to a real
+    installed location (from the Steam roots index). When ``install_dir`` is not
+    given we fall back to the manifest's declared install dir name.
     ``registry`` is an optional list of shared.registry.RegKey captured from the
     Windows registry; it is embedded in the bundle and never affects file scan.
     """
@@ -58,8 +62,8 @@ def build_game_bundle(game: Game, env: ph.Env, tags, out_path: Path,
     members: list[tuple[Path, str]] = []  # (abs_path, arcname)
     total = 0
 
+    install_dir = install_dir or (game.install_dirs[0] if game.install_dirs else None)
     for idx, entry in enumerate(game.save_files(env.os, tags)):
-        install_dir = game.install_dirs[0] if game.install_dirs else None
         resolved = ph.resolve(entry.template, env, game_install_dir=install_dir, root=root)
         matches = scan_mod.scan(resolved)
         if not matches:

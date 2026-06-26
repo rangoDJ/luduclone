@@ -102,10 +102,13 @@ def cmd_restore(args) -> int:
     if not names:
         print("Nothing to restore (no --game and no server backups).")
         return 0
+    from .roots import SteamIndex
+    index = SteamIndex.build()
     any_fail = False
     for name in names:
         res = restore_game(api, manifest, name, version=args.version, mode=args.mode,
-                           dry_run=args.dry_run, do_registry=not args.no_registry)
+                           dry_run=args.dry_run, do_registry=not args.no_registry,
+                           steam_index=index)
         mode = f" via {res.mode}" if res.mode else ""
         print(f"{name}: {res.status}{mode}" + (f" ({res.detail})" if res.detail else ""))
         if res.target_root:
@@ -135,14 +138,17 @@ def cmd_forget(args) -> int:
 
 def cmd_prefixes(args) -> int:
     from . import steam
+    from .roots import SteamIndex
     libs = steam.library_dirs()
     print(f"Steam libraries ({len(libs)}):")
     for lib in libs:
         print(f"  {lib}")
-    apps = steam.list_compat_apps()
-    print(f"Proton prefixes ({len(apps)} appids with compatdata):")
-    for appid, pfx in sorted(apps.items(), key=lambda kv: int(kv[0]) if kv[0].isdigit() else 0):
-        print(f"  {appid:<12} {pfx}")
+    index = SteamIndex.build()
+    print(f"\nInstalled Steam games ({len(index)}):")
+    for ig in sorted(index.by_appid.values(), key=lambda g: g.name.lower()):
+        tag = "  [proton]" if ig.prefix else ""
+        print(f"  {ig.appid:<10} {ig.name}{tag}")
+        print(f"             install: {ig.install_dir}")
     return 0
 
 

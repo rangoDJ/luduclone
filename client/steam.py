@@ -1,9 +1,10 @@
-"""Discover Steam libraries and Proton compatdata prefixes on Linux / Steam Deck.
+"""Discover Steam libraries and Proton compatdata prefixes (Windows + Linux).
 
 A game run through Proton stores its Windows-style files inside a *compatibility
 prefix* at ``<library>/steamapps/compatdata/<appid>/pfx`` (which contains
 ``drive_c``). We locate that prefix from the game's Steam app id so the restore
-flow can re-root Windows save paths into it.
+flow can re-root Windows save paths into it. On Windows we also use the Steam
+install to find where each game is installed (for ``<base>`` saves).
 """
 from __future__ import annotations
 
@@ -11,7 +12,7 @@ import os
 import re
 from pathlib import Path
 
-# Common Steam root locations (Steam Deck, native, and Flatpak installs).
+# Common Steam root locations on Linux (Steam Deck, native, Flatpak).
 _STEAM_ROOT_CANDIDATES = (
     "~/.steam/steam",
     "~/.steam/root",
@@ -19,17 +20,49 @@ _STEAM_ROOT_CANDIDATES = (
     "~/.var/app/com.valvesoftware.Steam/.local/share/Steam",
 )
 
+# Default Windows Steam install locations (used if the registry lookup fails).
+_WINDOWS_STEAM_CANDIDATES = (
+    "C:/Program Files (x86)/Steam",
+    "C:/Program Files/Steam",
+)
+
 # Matches `"path"   "/some/library"` lines in libraryfolders.vdf.
 _VDF_PATH = re.compile(r'"path"\s*"([^"]+)"')
+
+
+def _windows_steam_path() -> Path | None:
+    """Read the Steam install path from the Windows registry, if available."""
+    try:
+        import winreg  # type: ignore
+    except ImportError:
+        return None
+    for hive, key in ((winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam"),
+                      (winreg.HKEY_LOCAL_MACHINE, r"Software\WOW6432Node\Valve\Steam")):
+        try:
+            with winreg.OpenKey(hive, key) as k:
+                val, _ = winreg.QueryValueEx(k, "SteamPath" if hive ==
+                                             winreg.HKEY_CURRENT_USER else "InstallPath")
+                p = Path(val)
+                if p.exists():
+                    return p
+        except OSError:
+            continue
+    return None
 
 
 def steam_roots() -> list[Path]:
     """Return existing Steam root dirs (deduped, symlinks resolved)."""
     seen: dict[Path, None] = {}
-    for cand in _STEAM_ROOT_CANDIDATES:
+    candidates: list[str] = list(_STEAM_ROOT_CANDIDATES)
+    if os.name == "nt":
+        candidates += list(_WINDOWS_STEAM_CANDIDATES)
+    for cand in candidates:
         p = Path(os.path.expanduser(cand))
         if p.exists():
             seen.setdefault(p.resolve(), None)
+    win = _windows_steam_path()
+    if win:
+        seen.setdefault(win.resolve(), None)
     return list(seen)
 
 
