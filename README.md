@@ -119,6 +119,20 @@ It has two tabs sharing one server connection:
 Restoring **on Windows** writes saves back to their original Windows locations;
 **on the Steam Deck** it routes them into the Proton prefix (or native paths).
 
+### Updating the client
+
+The packaged exes self-update from GitHub releases. The GUI checks on startup and
+via **Help → Check for updates**; the CLI has:
+
+```bash
+luduclone update          # report whether a newer release exists
+luduclone update --apply  # download it and swap the exe in place (restart after)
+luduclone --version
+```
+
+Self-update only applies to the built executables — running from source, it just
+reports the available version (use `git pull`).
+
 ## Restore on Steam Deck / Linux (Proton)
 
 For Windows games run through Proton, the client injects your saves into the

@@ -21,13 +21,16 @@ from .backup import detect_env, run_backup
 from .config import ClientConfig, CONFIG_PATH
 from .restore import restore_game
 from .roots import SteamIndex
+from .version import __version__
+from . import updater
 from shared import manifest as manifest_mod
 
 
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
-        root.title("luduclone")
+        updater.cleanup_old()  # clear any leftover *.old from a prior self-update
+        root.title(f"luduclone {__version__}")
         root.geometry("720x600")
         root.minsize(620, 480)
 
@@ -54,10 +57,20 @@ class App:
 
         self._build(root)
         self.root.after(100, self._tick)
+        # Non-blocking check for a newer release on startup.
+        threading.Thread(target=self._check_updates, args=(False,), daemon=True).start()
 
     # ---- layout --------------------------------------------------------
     def _build(self, root: tk.Tk) -> None:
         pad = {"padx": 8, "pady": 4}
+
+        menubar = tk.Menu(root)
+        helpm = tk.Menu(menubar, tearoff=0)
+        helpm.add_command(label="Check for updates…", command=self.on_check_updates)
+        helpm.add_command(label="About", command=self.on_about)
+        menubar.add_cascade(label="Help", menu=helpm)
+        root.config(menu=menubar)
+
         top = ttk.Frame(root)
         top.pack(fill="x", **pad)
         ttk.Label(top, text="Server").grid(row=0, column=0, sticky="w")
@@ -329,6 +342,57 @@ class App:
             if res.status == "restored":
                 ok += 1
         self.log_line(f"Done. Restored {ok}/{total} game(s).")
+
+
+    # ---- updates -------------------------------------------------------
+    def on_check_updates(self) -> None:
+        self._run(self._check_updates, True)
+
+    def on_about(self) -> None:
+        messagebox.showinfo(
+            "About luduclone",
+            f"luduclone {__version__}\n\nSelf-hosted cross-OS game-save sync.\n"
+            f"https://github.com/{updater.GITHUB_REPO}")
+
+    def _check_updates(self, manual: bool) -> None:
+        try:
+            rel = updater.update_available()
+        except Exception as e:  # noqa: BLE001
+            if manual:
+                self._popup(lambda: messagebox.showerror("luduclone", f"Update check failed: {e}"))
+            return
+        if rel is None:
+            if manual:
+                self._popup(lambda: messagebox.showinfo(
+                    "luduclone", f"You are up to date (v{updater.current_version()})."))
+            return
+        self.log_line(f"Update available: {rel.tag} (you have v{updater.current_version()}).")
+        if not updater.is_frozen():
+            if manual:
+                self._popup(lambda: messagebox.showinfo(
+                    "luduclone", f"Update {rel.tag} available. Running from source — "
+                    "use 'git pull' to update."))
+            return
+        self._popup(lambda: self._offer_update(rel))
+
+    def _offer_update(self, rel) -> None:
+        if messagebox.askyesno(
+                "luduclone update",
+                f"Update {rel.tag} is available (you have v{updater.current_version()}).\n"
+                "Download and install it now?"):
+            self._run(self._do_update, rel)
+
+    def _do_update(self, rel) -> None:
+        self.log_line(f"Downloading {rel.tag}…")
+        exe = updater.apply_update(
+            rel, progress=lambda d, t: self.set_progress(d, t, "Updating"))
+        self.log_line(f"Updated to {rel.tag}. Restart to use the new version.")
+        self._popup(lambda: messagebox.showinfo(
+            "luduclone", f"Updated to {rel.tag}.\nPlease restart {exe.name}."))
+
+    def _popup(self, fn) -> None:
+        """Schedule a dialog on the Tk main thread."""
+        self.root.after(0, fn)
 
 
 def _human(n: int) -> str:

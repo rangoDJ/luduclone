@@ -25,6 +25,8 @@ from .api import ApiClient
 from .backup import detect_env, run_backup
 from .config import ClientConfig
 from .restore import restore_game
+from .version import __version__
+from . import updater
 
 
 def _human(n: int) -> str:
@@ -122,6 +124,40 @@ def cmd_restore(args) -> int:
     return 1 if any_fail else 0
 
 
+def cmd_update(args) -> int:
+    try:
+        rel = updater.fetch_latest()
+    except Exception as e:  # noqa: BLE001
+        print(f"Update check failed: {e}", file=sys.stderr)
+        return 1
+    if rel is None:
+        print("Could not determine the latest release.", file=sys.stderr)
+        return 1
+    print(f"Current: v{updater.current_version()}   Latest: {rel.tag}")
+    if updater.update_available(rel) is None:
+        print("You are up to date.")
+        return 0
+    if not updater.is_frozen():
+        print(f"Update {rel.tag} available. Running from source — `git pull` to update.")
+        print(f"Release notes: {rel.html_url}")
+        return 0
+    if not args.apply:
+        print(f"Update {rel.tag} available. Re-run with --apply to install.")
+        return 0
+    print(f"Downloading {rel.tag}…")
+    last = [-1]
+
+    def prog(done, total):
+        pct = int(100 * done / total) if total else 0
+        if pct != last[0] and pct % 10 == 0:
+            last[0] = pct
+            print(f"  {pct}%")
+
+    exe = updater.apply_update(rel, progress=prog)
+    print(f"Updated to {rel.tag}. Restart {exe.name} to use the new version.")
+    return 0
+
+
 def cmd_forget(args) -> int:
     cfg = ClientConfig.load(args.server, args.token)
     api = ApiClient(cfg)
@@ -176,6 +212,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="luduclone", description="Cross-OS game-save sync client")
     p.add_argument("--server", help="Server base URL (overrides config/env)")
     p.add_argument("--token", help="Auth token (overrides config/env)")
+    p.add_argument("-V", "--version", action="version", version=f"luduclone {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     c = sub.add_parser("configure", help="Save server URL + token")
@@ -213,10 +250,15 @@ def build_parser() -> argparse.ArgumentParser:
     fg = sub.add_parser("forget", help="Delete a game's backups from the server")
     fg.add_argument("game", nargs="+", help="Game name(s) to delete")
     fg.set_defaults(func=cmd_forget)
+
+    up = sub.add_parser("update", help="Check for and install client updates")
+    up.add_argument("--apply", action="store_true", help="Download and install if newer")
+    up.set_defaults(func=cmd_update)
     return p
 
 
 def main(argv=None) -> int:
+    updater.cleanup_old()  # remove any leftover *.old from a prior self-update
     args = build_parser().parse_args(argv)
     return args.func(args)
 
