@@ -127,7 +127,12 @@ def read_bundle_meta(bundle_path: Path) -> dict | None:
 
 def extract_entry_files(bundle_path: Path, index: int, dest_dir: Path) -> list[Path]:
     """Extract the files belonging to one entry (``e{index}/``) into ``dest_dir``,
-    preserving their relative subpaths. Returns the written paths."""
+    preserving their relative subpaths. Returns the written paths.
+
+    Bundles come from a server and are therefore untrusted: member names that
+    escape ``dest_dir`` (via ``..`` or an absolute path) are rejected so a crafted
+    archive can't write outside the intended directory (path traversal / zip-slip).
+    """
     prefix = f"e{index}/"
     written: list[Path] = []
     dest_dir = Path(dest_dir)
@@ -135,8 +140,9 @@ def extract_entry_files(bundle_path: Path, index: int, dest_dir: Path) -> list[P
         for member in tar.getmembers():
             if not member.isfile() or not member.name.startswith(prefix):
                 continue
-            rel = member.name[len(prefix):]
-            target = dest_dir / rel
+            target = _safe_join(dest_dir, member.name[len(prefix):])
+            if target is None:
+                continue  # unsafe member name (path traversal) -> skip
             target.parent.mkdir(parents=True, exist_ok=True)
             src = tar.extractfile(member)
             if src is None:
@@ -145,3 +151,15 @@ def extract_entry_files(bundle_path: Path, index: int, dest_dir: Path) -> list[P
                 f.write(src.read())
             written.append(target)
     return written
+
+
+def _safe_join(dest_dir: Path, rel: str) -> Path | None:
+    """Join ``rel`` under ``dest_dir``, or None if it would escape the directory."""
+    import os
+    rel = rel.replace("\\", "/").lstrip("/")
+    norm = os.path.normpath(rel)
+    if not norm or norm == "." or norm.startswith("..") or os.path.isabs(norm):
+        return None
+    if ".." in Path(norm).parts:
+        return None
+    return dest_dir / norm

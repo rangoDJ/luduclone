@@ -1,6 +1,7 @@
 """Thin HTTP client for the luduclone server."""
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Optional
@@ -69,8 +70,13 @@ class ApiClient:
 
     def download_latest(self, game: str, dest: Path,
                         version: Optional[int] = None) -> dict:
-        """Download a bundle to ``dest``; returns the metadata from headers."""
+        """Download a bundle to ``dest``; returns the metadata from headers.
+
+        Verifies the payload against the server-reported SHA-256 so a truncated
+        or corrupted download is never handed to the restore step.
+        """
         suffix = f"/{version}" if version is not None else "/latest"
+        sha = hashlib.sha256()
         with self.session.get(
             self._url(f"/games/{game}/saves{suffix}"), stream=True, timeout=600
         ) as r:
@@ -78,6 +84,7 @@ class ApiClient:
             dest.parent.mkdir(parents=True, exist_ok=True)
             with open(dest, "wb") as f:
                 for chunk in r.iter_content(chunk_size=1024 * 1024):
+                    sha.update(chunk)
                     f.write(chunk)
             meta = {
                 "version": r.headers.get("X-Luduclone-Version"),
@@ -85,4 +92,9 @@ class ApiClient:
                 "sha256": r.headers.get("X-Luduclone-Sha256"),
                 "mapping": json.loads(r.headers.get("X-Luduclone-Mapping", "{}")),
             }
+        expected = meta.get("sha256")
+        if expected and sha.hexdigest() != expected:
+            dest.unlink(missing_ok=True)
+            raise IOError(f"Checksum mismatch for {game} "
+                          f"(expected {expected[:12]}…, got {sha.hexdigest()[:12]}…)")
         return meta
