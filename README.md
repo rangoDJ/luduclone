@@ -110,8 +110,14 @@ Prefer a window over the terminal? Run the GUI:
 python -m client.gui        # or just run luduclone-gui.exe
 ```
 
-It exposes the same Scan / Back up & upload / Server games actions with fields
-for the server URL and token.
+It has two tabs sharing one server connection:
+- **Back up** — Scan (preview) / Back up & upload, with progress.
+- **Restore** — once a server is configured it probes for available saves and
+  lists them; select one or more and **Restore selected**, or **Restore all**.
+  A mode dropdown (auto/proton/native/windows) picks where saves land.
+
+Restoring **on Windows** writes saves back to their original Windows locations;
+**on the Steam Deck** it routes them into the Proton prefix (or native paths).
 
 ## Restore on Steam Deck / Linux (Proton)
 

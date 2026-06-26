@@ -1,11 +1,16 @@
-"""Tkinter GUI for the luduclone client (mainly the Windows backup side).
+"""Tkinter GUI for the luduclone client.
 
-Wraps the same backup/scan/remote operations as the CLI, running them on a
-worker thread so the window stays responsive, and streaming output to a log box.
-Tkinter is in the Python stdlib, so this bundles into the exe with no extra deps.
+Two tabs sharing one server connection:
+  * Back up  -- scan this machine and upload found saves
+  * Restore  -- probe the server, list available saves, and download+install
+                them individually or all at once
+
+Operations run on a worker thread so the window stays responsive; output streams
+to a log box and a progress bar. Tkinter is stdlib, so this bundles into the exe.
 """
 from __future__ import annotations
 
+import os
 import queue
 import threading
 import tkinter as tk
@@ -14,6 +19,8 @@ from tkinter import ttk, messagebox
 from .api import ApiClient
 from .backup import detect_env, run_backup
 from .config import ClientConfig, CONFIG_PATH
+from .restore import restore_game
+from .roots import SteamIndex
 from shared import manifest as manifest_mod
 
 
@@ -21,14 +28,15 @@ class App:
     def __init__(self, root: tk.Tk):
         self.root = root
         root.title("luduclone")
-        root.geometry("680x520")
-        root.minsize(560, 420)
+        root.geometry("720x600")
+        root.minsize(620, 480)
 
         self._log_q: queue.Queue[str] = queue.Queue()
         self._busy = False
-        self._prog: tuple[int, int, str] | None = None  # (current, total, label)
+        self._prog: tuple[int, int, str] | None = None
+        self._remote_games: list[dict] = []
+        self._buttons: list[ttk.Button] = []
 
-        # Pre-fill from saved config / env if present.
         server, token = "", ""
         try:
             cfg = ClientConfig.load()
@@ -41,44 +49,31 @@ class App:
         self.game_var = tk.StringVar()
         self.config_var = tk.BooleanVar(value=False)
         self.refresh_var = tk.BooleanVar(value=False)
+        self.mode_var = tk.StringVar(value="auto")
+        self.noreg_var = tk.BooleanVar(value=False)
 
         self._build(root)
-        self.root.after(100, self._drain_log)
+        self.root.after(100, self._tick)
 
     # ---- layout --------------------------------------------------------
     def _build(self, root: tk.Tk) -> None:
         pad = {"padx": 8, "pady": 4}
         top = ttk.Frame(root)
         top.pack(fill="x", **pad)
-
         ttk.Label(top, text="Server").grid(row=0, column=0, sticky="w")
-        ttk.Entry(top, textvariable=self.server_var, width=44).grid(
+        ttk.Entry(top, textvariable=self.server_var).grid(
             row=0, column=1, columnspan=3, sticky="we", padx=4)
         ttk.Label(top, text="Token").grid(row=1, column=0, sticky="w")
-        ttk.Entry(top, textvariable=self.token_var, width=44, show="•").grid(
+        ttk.Entry(top, textvariable=self.token_var, show="•").grid(
             row=1, column=1, columnspan=2, sticky="we", padx=4)
-        ttk.Button(top, text="Save config", command=self.on_save).grid(
+        ttk.Button(top, text="Save & connect", command=self.on_save).grid(
             row=1, column=3, sticky="e")
         top.columnconfigure(1, weight=1)
 
-        opts = ttk.Frame(root)
-        opts.pack(fill="x", **pad)
-        ttk.Label(opts, text="Only game (optional)").pack(side="left")
-        ttk.Entry(opts, textvariable=self.game_var, width=24).pack(side="left", padx=6)
-        ttk.Checkbutton(opts, text="Include config files",
-                        variable=self.config_var).pack(side="left", padx=6)
-        ttk.Checkbutton(opts, text="Refresh manifest",
-                        variable=self.refresh_var).pack(side="left", padx=6)
-
-        btns = ttk.Frame(root)
-        btns.pack(fill="x", **pad)
-        self.scan_btn = ttk.Button(btns, text="Scan (preview)", command=self.on_scan)
-        self.scan_btn.pack(side="left")
-        self.backup_btn = ttk.Button(btns, text="Back up & upload", command=self.on_backup)
-        self.backup_btn.pack(side="left", padx=6)
-        self.remote_btn = ttk.Button(btns, text="Server games", command=self.on_remote)
-        self.remote_btn.pack(side="left")
-        ttk.Button(btns, text="Clear log", command=self.clear_log).pack(side="right")
+        nb = ttk.Notebook(root)
+        nb.pack(fill="both", expand=True, **pad)
+        nb.add(self._backup_tab(nb), text="Back up")
+        nb.add(self._restore_tab(nb), text="Restore")
 
         prog = ttk.Frame(root)
         prog.pack(fill="x", **pad)
@@ -87,17 +82,71 @@ class App:
         self.prog_label = ttk.Label(prog, text="", width=26, anchor="w")
         self.prog_label.pack(side="left", padx=8)
 
-        self.log = tk.Text(root, height=16, wrap="word", state="disabled")
-        self.log.pack(fill="both", expand=True, padx=8, pady=(4, 4))
+        self.log = tk.Text(root, height=9, wrap="word", state="disabled")
+        self.log.pack(fill="both", expand=True, padx=8, pady=(0, 4))
 
         self.status = ttk.Label(root, text="Ready", anchor="w", relief="sunken")
         self.status.pack(fill="x", side="bottom")
 
-    # ---- logging (thread-safe via queue) -------------------------------
+    def _backup_tab(self, nb) -> ttk.Frame:
+        f = ttk.Frame(nb)
+        opts = ttk.Frame(f)
+        opts.pack(fill="x", pady=6)
+        ttk.Label(opts, text="Only game (optional)").pack(side="left")
+        ttk.Entry(opts, textvariable=self.game_var, width=22).pack(side="left", padx=6)
+        ttk.Checkbutton(opts, text="Include config", variable=self.config_var).pack(side="left", padx=6)
+        ttk.Checkbutton(opts, text="Refresh manifest", variable=self.refresh_var).pack(side="left", padx=6)
+        btns = ttk.Frame(f)
+        btns.pack(fill="x")
+        self._mkbtn(btns, "Scan (preview)", self.on_scan).pack(side="left")
+        self._mkbtn(btns, "Back up & upload", self.on_backup).pack(side="left", padx=6)
+        return f
+
+    def _restore_tab(self, nb) -> ttk.Frame:
+        f = ttk.Frame(nb)
+        bar = ttk.Frame(f)
+        bar.pack(fill="x", pady=6)
+        self._mkbtn(bar, "Refresh from server", self.on_refresh_remote).pack(side="left")
+        self._mkbtn(bar, "Restore selected", self.on_restore_selected).pack(side="left", padx=6)
+        self._mkbtn(bar, "Restore all", self.on_restore_all).pack(side="left")
+        ttk.Label(bar, text="Mode").pack(side="left", padx=(12, 2))
+        ttk.Combobox(bar, textvariable=self.mode_var, width=8, state="readonly",
+                     values=("auto", "proton", "native", "windows")).pack(side="left")
+        ttk.Checkbutton(bar, text="No registry", variable=self.noreg_var).pack(side="left", padx=6)
+
+        cols = ("versions", "latest", "updated")
+        self.tree = ttk.Treeview(f, columns=cols, show="tree headings", selectmode="extended")
+        self.tree.heading("#0", text="Game")
+        self.tree.heading("versions", text="Versions")
+        self.tree.heading("latest", text="Latest")
+        self.tree.heading("updated", text="Last updated")
+        self.tree.column("#0", width=300)
+        self.tree.column("versions", width=70, anchor="center")
+        self.tree.column("latest", width=60, anchor="center")
+        self.tree.column("updated", width=160)
+        self.tree.pack(fill="both", expand=True)
+        self.tree.bind("<Double-1>", lambda e: self.on_restore_selected())
+        return f
+
+    def _mkbtn(self, parent, text, cmd) -> ttk.Button:
+        b = ttk.Button(parent, text=text, command=cmd)
+        self._buttons.append(b)
+        return b
+
+    # ---- log + progress (thread-safe) ----------------------------------
     def log_line(self, text: str) -> None:
         self._log_q.put(text)
 
-    def _drain_log(self) -> None:
+    def set_progress(self, current: int, total: int, label: str) -> None:
+        self._prog = (current, total, label)
+
+    def reset_progress(self) -> None:
+        self._prog = None
+
+    def set_status(self, text: str) -> None:
+        self.status.configure(text=text)
+
+    def _tick(self) -> None:
         try:
             while True:
                 line = self._log_q.get_nowait()
@@ -107,62 +156,26 @@ class App:
                 self.log.configure(state="disabled")
         except queue.Empty:
             pass
-        self._update_progress()
-        self.root.after(100, self._drain_log)
-
-    # ---- progress (thread-safe via a single shared tuple) --------------
-    def set_progress(self, current: int, total: int, label: str) -> None:
-        self._prog = (current, total, label)
-
-    def reset_progress(self) -> None:
-        self._prog = None
-
-    def _update_progress(self) -> None:
         p = self._prog
         if p is None:
             self.progress["value"] = 0
             self.prog_label.configure(text="")
-            return
-        current, total, label = p
-        if total > 0:
-            pct = max(0, min(100, 100 * current / total))
-            self.progress["value"] = pct
-            self.prog_label.configure(text=f"{label}  {pct:.0f}%")
         else:
-            self.prog_label.configure(text=label)
+            cur, tot, label = p
+            if tot > 0:
+                pct = max(0, min(100, 100 * cur / tot))
+                self.progress["value"] = pct
+                self.prog_label.configure(text=f"{label}  {pct:.0f}%")
+            else:
+                self.prog_label.configure(text=label)
+        self.root.after(100, self._tick)
 
-    def clear_log(self) -> None:
-        self.log.configure(state="normal")
-        self.log.delete("1.0", "end")
-        self.log.configure(state="disabled")
-
-    def set_status(self, text: str) -> None:
-        self.status.configure(text=text)
-
-    # ---- config --------------------------------------------------------
-    def _cfg(self) -> ClientConfig | None:
-        server = self.server_var.get().strip()
-        if not server:
-            messagebox.showerror("luduclone", "Enter a server URL first.")
-            return None
-        return ClientConfig(server=server.rstrip("/"),
-                            token=self.token_var.get().strip() or None)
-
-    def on_save(self) -> None:
-        cfg = self._cfg()
-        if not cfg:
-            return
-        cfg.save()
-        self.set_status(f"Saved to {CONFIG_PATH}")
-        # Verify connectivity in the background.
-        self._run(self._verify, cfg)
-
-    # ---- operations (run on worker thread) -----------------------------
+    # ---- worker plumbing ----------------------------------------------
     def _run(self, fn, *args) -> None:
         if self._busy:
             return
         self._busy = True
-        self._toggle_buttons(False)
+        self._toggle(False)
         self.set_status("Working…")
 
         def worker():
@@ -173,26 +186,29 @@ class App:
             finally:
                 self._busy = False
                 self.reset_progress()
-                self.root.after(0, lambda: self._toggle_buttons(True))
+                self.root.after(0, lambda: self._toggle(True))
                 self.root.after(0, lambda: self.set_status("Ready"))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _toggle_buttons(self, enabled: bool) -> None:
-        state = "normal" if enabled else "disabled"
-        for b in (self.scan_btn, self.backup_btn, self.remote_btn):
-            b.configure(state=state)
+    def _toggle(self, enabled: bool) -> None:
+        for b in self._buttons:
+            b.configure(state="normal" if enabled else "disabled")
+
+    def _cfg(self) -> ClientConfig | None:
+        server = self.server_var.get().strip()
+        if not server:
+            messagebox.showerror("luduclone", "Enter a server URL first.")
+            return None
+        return ClientConfig(server=server.rstrip("/"),
+                            token=self.token_var.get().strip() or None)
 
     def _load_manifest(self, cfg: ClientConfig):
         api = ApiClient(cfg)
         if self.refresh_var.get() or not cfg.manifest_cache.exists():
             self.log_line("Downloading manifest from server…")
-            api.fetch_manifest(
-                progress=lambda done, total: self.set_progress(
-                    done, total, "Downloading manifest"))
-            self.log_line("Manifest ready.")
-        manifest = manifest_mod.Manifest.from_yaml(
-            cfg.manifest_cache.read_text(encoding="utf-8"))
+            api.fetch_manifest(progress=lambda d, t: self.set_progress(d, t, "Downloading manifest"))
+        manifest = manifest_mod.Manifest.from_yaml(cfg.manifest_cache.read_text(encoding="utf-8"))
         return api, manifest
 
     def _tags(self):
@@ -202,10 +218,20 @@ class App:
         g = self.game_var.get().strip()
         return [g] if g else None
 
-    def _verify(self, cfg: ClientConfig) -> None:
-        health = ApiClient(cfg).health()
-        self.log_line(f"Connected: {health}")
+    # ---- config / connect ---------------------------------------------
+    def on_save(self) -> None:
+        cfg = self._cfg()
+        if not cfg:
+            return
+        cfg.save()
+        self.set_status(f"Saved to {CONFIG_PATH}")
+        self._run(self._connect, cfg)
 
+    def _connect(self, cfg: ClientConfig) -> None:
+        self.log_line(f"Connected: {ApiClient(cfg).health()}")
+        self._refresh_remote(cfg)
+
+    # ---- backup --------------------------------------------------------
     def on_scan(self) -> None:
         cfg = self._cfg()
         if cfg:
@@ -215,8 +241,8 @@ class App:
         api, manifest = self._load_manifest(cfg)
         env = detect_env()
         self.log_line(f"Scanning {len(manifest)} games on {env.os}…")
-        report = run_backup(api, manifest, env, tags=self._tags(),
-                            only=self._only(), dry_run=True,
+        report = run_backup(api, manifest, env, tags=self._tags(), only=self._only(),
+                            dry_run=True,
                             progress=lambda i, t, n: self.set_progress(i, t, "Scanning"))
         if not report:
             self.log_line("No save data found on this machine.")
@@ -240,23 +266,69 @@ class App:
         uploaded = [r for r in report if r["status"] == "uploaded"]
         for r in sorted(uploaded, key=lambda r: r["game"]):
             reg = f"  +{r['registry']} reg" if r.get("registry") else ""
-            self.log_line(f"  uploaded {r['game']}  v{r['version']}  "
-                          f"{r['files']} files, {_human(r['bytes'])}{reg}")
+            self.log_line(f"  uploaded {r['game']}  v{r['version']}  {r['files']} files, "
+                          f"{_human(r['bytes'])}{reg}")
         self.log_line(f"Done. Uploaded {len(uploaded)} game(s).")
+        self._refresh_remote(cfg)
 
-    def on_remote(self) -> None:
+    # ---- restore -------------------------------------------------------
+    def on_refresh_remote(self) -> None:
         cfg = self._cfg()
         if cfg:
-            self._run(self._remote, cfg)
+            self._run(self._refresh_remote, cfg)
 
-    def _remote(self, cfg: ClientConfig) -> None:
+    def _refresh_remote(self, cfg: ClientConfig) -> None:
         games = ApiClient(cfg).list_games()
-        if not games:
-            self.log_line("No backups on the server yet.")
+        self._remote_games = games
+        self.root.after(0, self._populate_tree)
+        self.log_line(f"Server has {len(games)} game(s) with backups.")
+
+    def _populate_tree(self) -> None:
+        self.tree.delete(*self.tree.get_children())
+        for g in sorted(self._remote_games, key=lambda g: g["game"].lower()):
+            self.tree.insert("", "end", iid=g["game"], text=g["game"],
+                             values=(g["versions"], f"v{g['latest']}", _fmt_time(g.get("updated"))))
+
+    def on_restore_selected(self) -> None:
+        names = list(self.tree.selection())
+        if not names:
+            messagebox.showinfo("luduclone", "Select one or more games in the list first.")
             return
-        self.log_line(f"{len(games)} game(s) on the server:")
-        for g in games:
-            self.log_line(f"  {g['game']}  —  {g['versions']} version(s), latest v{g['latest']}")
+        self._start_restore(names)
+
+    def on_restore_all(self) -> None:
+        names = [g["game"] for g in self._remote_games]
+        if not names:
+            messagebox.showinfo("luduclone", "Refresh from the server first.")
+            return
+        if not messagebox.askyesno("luduclone", f"Restore all {len(names)} game(s)?"):
+            return
+        self._start_restore(names)
+
+    def _start_restore(self, names: list[str]) -> None:
+        cfg = self._cfg()
+        if cfg:
+            self._run(self._restore, cfg, names)
+
+    def _restore(self, cfg: ClientConfig, names: list[str]) -> None:
+        api, manifest = self._load_manifest(cfg)
+        index = SteamIndex.build()
+        total = len(names)
+        self.log_line(f"Restoring {total} game(s) (mode: {self.mode_var.get()})…")
+        ok = 0
+        for i, name in enumerate(names, 1):
+            self.set_progress(i, total, "Restoring")
+            res = restore_game(api, manifest, name, mode=self.mode_var.get(),
+                               do_registry=not self.noreg_var.get(), steam_index=index)
+            detail = f" ({res.detail})" if res.detail else ""
+            self.log_line(f"  {name}: {res.status}"
+                          + (f" via {res.mode}" if res.mode else "") + detail)
+            for o in res.entries:
+                if o.status != "restored":
+                    self.log_line(f"      [{o.status}] {o.template}")
+            if res.status == "restored":
+                ok += 1
+        self.log_line(f"Done. Restored {ok}/{total} game(s).")
 
 
 def _human(n: int) -> str:
@@ -266,6 +338,13 @@ def _human(n: int) -> str:
             return f"{f:.1f}{unit}"
         f /= 1024
     return f"{f:.1f}B"
+
+
+def _fmt_time(epoch) -> str:
+    if not epoch:
+        return ""
+    import datetime
+    return datetime.datetime.fromtimestamp(epoch).strftime("%Y-%m-%d %H:%M")
 
 
 def main() -> int:

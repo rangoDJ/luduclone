@@ -196,8 +196,8 @@ def build_parser() -> argparse.ArgumentParser:
     re_ = sub.add_parser("restore", help="Download saves and inject into Proton prefixes")
     re_.add_argument("--game", action="append", help="Limit to this game (repeatable)")
     re_.add_argument("--version", type=int, help="Restore a specific version (default: latest)")
-    re_.add_argument("--mode", choices=("auto", "proton", "native"), default="auto",
-                     help="Target selection (default: auto)")
+    re_.add_argument("--mode", choices=("auto", "proton", "native", "windows"),
+                     default="auto", help="Target selection (default: auto)")
     re_.add_argument("--no-registry", action="store_true",
                      help="Skip merging registry keys into the Proton prefix")
     re_.add_argument("--dry-run", action="store_true", help="Show targets without writing")

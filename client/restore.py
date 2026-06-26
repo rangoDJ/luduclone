@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import dataclasses
 import glob
+import os
 import re
 import tempfile
 from pathlib import Path
@@ -80,6 +81,8 @@ def restore_game(api: ApiClient, manifest: Manifest, game_name: str, *,
         if chosen == "proton":
             return _restore_proton(game, dest, entries, reg_keys, Path(target),
                                    installed, dry_run=dry_run, do_registry=do_registry)
+        if chosen == "windows":
+            return _restore_windows(game, dest, entries, installed, dry_run=dry_run)
         return _restore_native(game, dest, entries, installed, dry_run=dry_run)
 
 
@@ -87,10 +90,15 @@ def _decide_mode(game: Game, mode: str,
                  installed: InstalledGame | None) -> tuple[str | None, str]:
     """Return (mode, target). For proton, target is the pfx path; otherwise a
     human-readable note when no target is available."""
+    on_windows = os.name == "nt"
     pfx = installed.prefix if installed and installed.prefix else (
         steam.compat_prefix(game.steam_id) if game.steam_id is not None else None)
     has_native = bool(game.save_files("linux"))
+    has_windows = bool(game.save_files("windows"))
 
+    if mode == "windows":
+        return ("windows", "windows") if has_windows else (
+            None, "manifest has no Windows save location")
     if mode == "proton":
         if pfx is None:
             return None, f"no Proton prefix for appid {game.steam_id}"
@@ -99,13 +107,29 @@ def _decide_mode(game: Game, mode: str,
         if not has_native:
             return None, "manifest has no native Linux save location"
         return "native", "native"
-    # auto
+    # auto: restoring on Windows writes back to Windows locations; on Linux,
+    # prefer a Proton prefix, else native paths.
+    if on_windows and has_windows:
+        return "windows", "windows"
     if pfx is not None:
         return "proton", str(pfx)
     if has_native:
         return "native", "native"
-    return None, ("game not installed via Proton here and no native Linux "
-                  "save path in manifest")
+    return None, ("not installed via Proton here and no native save path for "
+                  "this OS in the manifest")
+
+
+def _restore_windows(game: Game, bundle_path: Path, entries,
+                     installed: InstalledGame | None, *, dry_run: bool) -> RestoreResult:
+    """Restore back to the original Windows locations (client running on Windows)."""
+    env = ph.Env.detect_windows()
+    rkw = _root_args(installed)
+    outcomes = [_extract_to_template(bundle_path, e, e["template"], env,
+                                     dry_run=dry_run, **rkw)
+                for e in entries]
+    status = "restored" if any(o.status == "restored" for o in outcomes) else "no-data"
+    return RestoreResult(game.name, status, mode="windows", target_root=str(env.home),
+                         entries=outcomes)
 
 
 def _root_args(installed: InstalledGame | None) -> dict:
