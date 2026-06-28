@@ -162,7 +162,12 @@ def _restore_windows(game: Game, bundle_path: Path, entries, rkw: dict,
 
 def _resolve_args(game: Game, installed: InstalledGame | None) -> dict:
     """Resolver kwargs for restore: anchor <base>/<root>/<game> to the real
-    install dir and supply the Steam store ids when known."""
+    install dir and supply <storeGameId> (the Steam app id) when known.
+
+    ``<storeUserId>`` is deliberately left unset so it stays a wildcard and is
+    glob-matched against the real on-disk folder -- games name that folder with
+    either the 32-bit account id or the 17-digit SteamID64, so pinning it to the
+    local account id would target (or create) the wrong directory."""
     kw: dict = {}
     if installed is not None:
         kw["base"] = installed.base
@@ -170,9 +175,6 @@ def _resolve_args(game: Game, installed: InstalledGame | None) -> dict:
         kw["game_install_dir"] = installed.install_name
     if game.steam_id is not None:
         kw["store_game_id"] = str(game.steam_id)
-    uid = steam.primary_user_id()
-    if uid:
-        kw["store_user_id"] = uid
     return kw
 
 

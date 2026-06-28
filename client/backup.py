@@ -12,7 +12,6 @@ from .api import ApiClient
 from .bundle import build_game_bundle
 from .custom import CustomConfig
 from .roots import SteamIndex
-from . import steam as steam_mod
 from . import winregistry
 
 
@@ -22,9 +21,14 @@ def detect_env() -> ph.Env:
 
 
 def _build(game, env, tags, out_path, steam_index: SteamIndex | None = None,
-           store_user_id: str | None = None, ignores=None):
+           ignores=None):
     """Build a bundle, anchoring <base>/<root>/<game> to the real Steam install
-    dir when the game is installed, and capturing registry keys on Windows."""
+    dir when the game is installed, and capturing registry keys on Windows.
+
+    ``<storeUserId>`` is intentionally left as a wildcard (not the local Steam
+    account id): games name that subfolder inconsistently -- some use the 32-bit
+    account id, others the 17-digit SteamID64 -- so we glob it to match whatever
+    is actually on disk (matching ludusavi / the pre-store-id behaviour)."""
     installed = steam_index.get(game.steam_id) if steam_index is not None else None
     # A Steam-installed game is scanned in the "steam" store context so that
     # store-specific paths for other stores aren't matched.
@@ -36,7 +40,7 @@ def _build(game, env, tags, out_path, steam_index: SteamIndex | None = None,
         if keys:
             registry = winregistry.capture_keys(keys)
     return build_game_bundle(game, env, tags, out_path, installed=installed,
-                             store_user_id=store_user_id, allowed_stores=allowed_stores,
+                             allowed_stores=allowed_stores,
                              registry=registry, ignores=ignores)
 
 
@@ -50,13 +54,12 @@ def scan_games(manifest: Manifest, env: ph.Env, tags: Iterable[str] = DEFAULT_TA
     results = []
     names = only or list(manifest.games.keys())
     steam_index = SteamIndex.build()
-    store_user_id = steam_mod.primary_user_id()
     with tempfile.TemporaryDirectory() as tmp:
         for name in names:
             if name not in manifest:
                 continue
             out = Path(tmp) / f"{_safe(name)}.tar.gz"
-            res = _build(manifest[name], env, tags, out, steam_index, store_user_id)
+            res = _build(manifest[name], env, tags, out, steam_index)
             if res:
                 results.append(res)
     return results
@@ -77,7 +80,6 @@ def run_backup(api: ApiClient, manifest: Manifest, env: ph.Env,
     names = only or list(manifest.games.keys())
     total = len(names)
     steam_index = SteamIndex.build()
-    store_user_id = steam_mod.primary_user_id()
     with tempfile.TemporaryDirectory() as tmp:
         for i, name in enumerate(names, 1):
             if progress:
@@ -86,8 +88,7 @@ def run_backup(api: ApiClient, manifest: Manifest, env: ph.Env,
                 report.append({"game": name, "status": "unknown-game"})
                 continue
             out = Path(tmp) / f"{_safe(name)}.tar.gz"
-            res = _build(manifest[name], env, tags, out, steam_index, store_user_id,
-                         ignores=ignores)
+            res = _build(manifest[name], env, tags, out, steam_index, ignores=ignores)
             if not res:
                 continue  # not installed / no saves here
             reg = len(res.mapping.get("registry", []))
