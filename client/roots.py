@@ -34,8 +34,14 @@ class InstalledGame:
 
     @property
     def root(self) -> str:
-        """The ``<root>`` value so that ``<root>/<game>`` == install dir."""
-        return str(self.install_dir.parent).replace("\\", "/")
+        """The ``<root>`` value: the Steam library folder (holds steamapps,
+        and userdata for the main library)."""
+        return str(self.library).replace("\\", "/")
+
+    @property
+    def base(self) -> str:
+        """The ``<base>`` value: the game's full install directory."""
+        return str(self.install_dir).replace("\\", "/")
 
 
 class SteamIndex:

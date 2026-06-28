@@ -51,19 +51,23 @@ class FileEntry:
     tags: frozenset[str]
     constraints: tuple[Constraint, ...]
 
-    def applies_on(self, os_name: str) -> bool:
-        """True if this entry is relevant for the given OS.
+    def applies_on(self, os_name: str, allowed_stores=None) -> bool:
+        """True if this entry is relevant for the given OS (and store context).
 
-        An entry with no os constraint applies everywhere. An entry with one or
-        more constraints applies if ANY constraint matches the os (constraints
-        are OR-ed, matching ludusavi semantics).
+        Matching ludusavi: within a single ``when`` clause the os AND store must
+        both match; clauses are OR-ed. ``allowed_stores`` is the set of stores in
+        scope (e.g. {"steam"} for a Steam-installed game); pass None to ignore
+        store constraints entirely.
         """
         if not self.constraints:
             return True
-        oses = [c.os for c in self.constraints if c.os is not None]
-        if not oses:
-            return True
-        return os_name in oses
+        for c in self.constraints:
+            os_ok = c.os is None or c.os == os_name
+            store_ok = (c.store is None or allowed_stores is None
+                        or c.store in allowed_stores)
+            if os_ok and store_ok:
+                return True
+        return False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -80,11 +84,12 @@ class Game:
     install_dirs: tuple[str, ...]
     steam_id: int | None
 
-    def save_files(self, os_name: str, tags: Iterable[str] = DEFAULT_TAGS) -> list[FileEntry]:
+    def save_files(self, os_name: str, tags: Iterable[str] = DEFAULT_TAGS,
+                   allowed_stores=None) -> list[FileEntry]:
         want = set(tags)
         return [
             f for f in self.files
-            if f.applies_on(os_name) and (f.tags & want)
+            if f.applies_on(os_name, allowed_stores) and (f.tags & want)
         ]
 
 

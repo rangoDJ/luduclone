@@ -96,6 +96,37 @@ def compat_prefix(appid: int | str) -> Path | None:
     return None
 
 
+def primary_user_id() -> str | None:
+    """Best-effort Steam ``<storeUserId>`` (the userdata account id).
+
+    Prefers the most-recent account from ``config/loginusers.vdf``; falls back to
+    a sole ``userdata/<id>`` directory. Returns None if it can't be determined.
+    """
+    # loginusers.vdf: blocks keyed by 17-digit SteamID64 with "MostRecent" "1".
+    for root in steam_roots():
+        vdf = root / "config" / "loginusers.vdf"
+        if not vdf.exists():
+            continue
+        text = vdf.read_text(encoding="utf-8", errors="ignore")
+        # Find each "7656..." block and whether it's MostRecent.
+        chosen = None
+        for m in re.finditer(r'"(7656\d{13})"\s*\{([^}]*)\}', text, re.DOTALL):
+            sid64, body = m.group(1), m.group(2)
+            account_id = str(int(sid64) - 76561197960265728)
+            if '"MostRecent"' in body and re.search(r'"MostRecent"\s*"1"', body):
+                return account_id
+            chosen = chosen or account_id
+        if chosen:
+            return chosen
+    # Fallback: a single userdata/<id> directory across libraries/roots.
+    ids: set[str] = set()
+    for root in steam_roots():
+        ud = root / "userdata"
+        if ud.is_dir():
+            ids.update(c.name for c in ud.iterdir() if c.is_dir() and c.name.isdigit())
+    return next(iter(ids)) if len(ids) == 1 else None
+
+
 def list_compat_apps() -> dict[str, Path]:
     """Map every installed compatdata app id -> its pfx (for diagnostics)."""
     out: dict[str, Path] = {}

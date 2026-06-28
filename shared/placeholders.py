@@ -105,12 +105,17 @@ class Env:
 
 
 def resolve(template: str, env: Env, *, game_install_dir: str | None = None,
-            root: str | None = None) -> str:
+            root: str | None = None, base: str | None = None,
+            store_user_id: str | None = None, store_game_id: str | None = None) -> str:
     """Expand a manifest path template into a concrete globbable path.
 
-    Unknown user-specific segments become ``*``. The result always uses ``/``.
+    ``base``/``root``/``game_install_dir`` are independent (matching ludusavi):
+    ``<base>`` is the game's full install dir, ``<root>`` is the library/root
+    path, ``<game>`` is the install-dir name. If ``base`` is omitted it falls
+    back to ``<root>/<game>``. Unknown user-specific segments become ``*``.
     """
-    table = _table(env, game_install_dir=game_install_dir, root=root)
+    table = _table(env, game_install_dir=game_install_dir, root=root, base=base,
+                   store_user_id=store_user_id, store_game_id=store_game_id)
 
     def sub(m: re.Match) -> str:
         name = m.group(1)
@@ -133,18 +138,20 @@ def resolve(template: str, env: Env, *, game_install_dir: str | None = None,
     return out
 
 
-def _table(env: Env, *, game_install_dir: str | None, root: str | None) -> dict[str, str | None]:
+def _table(env: Env, *, game_install_dir: str | None, root: str | None,
+           base: str | None = None, store_user_id: str | None = None,
+           store_game_id: str | None = None) -> dict[str, str | None]:
     game = game_install_dir or _WILDCARD
     root_val = root or _WILDCARD
-    base = f"{root_val}/{game}"
+    base_val = base or f"{root_val}/{game}"
     return {
         "home": env.home,
-        "base": base,
+        "base": base_val,
         "root": root_val,
         "game": game,
         "osUserName": env.os_user_name or _WILDCARD,
-        "storeUserId": _WILDCARD,
-        "storeGameId": env.steam_game_id or _WILDCARD,
+        "storeUserId": store_user_id or _WILDCARD,
+        "storeGameId": store_game_id or env.steam_game_id or _WILDCARD,
         "winAppData": env.win_app_data,
         "winLocalAppData": env.win_local_app_data,
         "winLocalAppDataLow": env.win_local_app_data_low,
