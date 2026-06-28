@@ -79,7 +79,7 @@ uvicorn server.app:app --reload
 | GET    | `/manifest`                       | Cached ludusavi manifest (YAML)      |
 | GET    | `/games`                          | Games with backups for this user     |
 | GET    | `/games/{game}/saves`             | List versions                        |
-| POST   | `/games/{game}/saves`             | Upload bundle (multipart) + mapping  |
+| POST   | `/games/{game}/saves`             | Upload bundle (multipart) + mapping (+ optional `retain` cap) |
 | DELETE | `/games/{game}`                   | Delete all backups of a game         |
 | GET    | `/games/{game}/saves/latest`      | Download newest bundle               |
 | GET    | `/games/{game}/saves/{version}`   | Download specific version            |
@@ -98,6 +98,15 @@ python -m client scan                 # preview what's found on this machine
 python -m client backup               # bundle + upload everything found
 python -m client backup --game Celeste --config   # one game, include config files
 python -m client remote               # list what's backed up on the server
+
+# keep at most 5 versions per game on the server (0 = unlimited)
+python -m client configure --server http://nas:8000 --token secret --retain 5
+
+# custom games / restore redirects / backup ignore globs (stored locally)
+python -m client custom list
+python -m client custom add-game "My Game" --path "<home>/.myg/saves" --steam-id 12345
+python -m client custom add-redirect "C:/Users/old" "C:/Users/new"
+python -m client custom add-ignore "*/cache/*"
 ```
 
 `scan`/`backup` walk the whole manifest by default to discover installed games;
@@ -110,11 +119,21 @@ Prefer a window over the terminal? Run the GUI:
 python -m client.gui        # or just run luduclone-gui.exe
 ```
 
-It has two tabs sharing one server connection:
-- **Back up** — Scan (preview) / Back up & upload, with progress.
-- **Restore** — once a server is configured it probes for available saves and
-  lists them; select one or more and **Restore selected**, or **Restore all**.
-  A mode dropdown (auto/proton/native/windows) picks where saves land.
+Like ludusavi, each tab is a searchable, checkable game list with an expandable
+file tree (per save entry, with sizes) and a running summary of what's selected.
+Three tabs share one server connection:
+- **Back up** — **Scan this PC** lists every game with saves found here (all
+  ticked by default); untick what you don't want and **Back up checked**. The
+  **Keep last N** spinner caps retained versions per game (0 = unlimited).
+- **Restore** — once a server is configured, **Refresh from server** lists
+  available backups. **Preview** shows a per-file diff (new / changed /
+  unchanged) before you overwrite anything; **Restore checked** then writes only
+  the changed/new files and stashes anything it overwrites in an undo dir. A mode
+  dropdown (auto/proton/native/windows) picks where saves land.
+- **Custom** — define games not in the manifest (name + save paths + registry),
+  add restore **redirects** (rewrite a path prefix on the restore machine), and
+  **ignore** globs (skip matching files on backup). Saved immediately; re-scan to
+  apply.
 
 Restoring **on Windows** writes saves back to their original Windows locations;
 **on the Steam Deck** it routes them into the Proton prefix (or native paths).
@@ -142,6 +161,7 @@ game's compatibility prefix (`steamapps/compatdata/<appid>/pfx/...`).
 python -m client configure --server http://your-nas:8000 --token secret
 python -m client prefixes              # show discovered Steam libs + Proton prefixes
 python -m client restore --dry-run     # show where each save would go
+python -m client restore --preview     # per-file diff (new/changed/unchanged), no writes
 python -m client restore               # restore every backed-up game found here
 python -m client restore --game Celeste
 python -m client restore --mode native # force native Linux paths (official ports)
@@ -169,7 +189,9 @@ automatically via `libraryfolders.vdf`.
 - [x] Phase 3 — native Linux-port restore (`--mode native`/auto)
 - [x] Phase 5a — Windows registry capture + Proton `user.reg`/`system.reg` import
 - [x] Phase 6 — Steam roots: detect installed games + resolve `<base>`/`<root>`/`<game>`
-- [ ] Phase 5b — conflict/diff before overwrite, Lutris/Heroic/GOG roots, single-file client build
+- [x] Phase 5b — conflict/diff preview before overwrite, custom games + redirects
+      + ignore filters, retention limit, ludusavi-style checkable GUI
+- [ ] Phase 5c — Lutris/Heroic/GOG roots, single-file client build
 
 ### Steam roots / installed-game detection
 

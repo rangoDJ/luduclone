@@ -17,6 +17,11 @@ class Config:
     # How often the server refreshes its manifest copy from upstream.
     MANIFEST_MAX_AGE = int(os.environ.get("LUDUCLONE_MANIFEST_MAX_AGE", str(24 * 3600)))
 
+    # Default backup retention: keep at most this many versions per game (oldest
+    # pruned after each upload). 0 = unlimited. A client may request a smaller
+    # limit per upload; the stricter of the two wins.
+    RETAIN = int(os.environ.get("LUDUCLONE_RETAIN", "0"))
+
     @property
     def db_path(self) -> Path:
         return self.DATA_DIR / "luduclone.db"

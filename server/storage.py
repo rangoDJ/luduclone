@@ -154,6 +154,27 @@ class Store:
     def abs_path(self, rec: SaveRecord) -> Path:
         return self.data_dir / rec.path
 
+    # ----- retention ----------------------------------------------------
+    def prune(self, user: str, game: str, keep: int) -> list[int]:
+        """Keep only the ``keep`` newest versions of a game; delete older bundles
+        (files + rows). Returns the version numbers removed. ``keep <= 0`` is a
+        no-op (unlimited retention)."""
+        if keep <= 0:
+            return []
+        records = self.list_versions(user, game)   # newest first
+        stale = records[keep:]
+        removed: list[int] = []
+        for rec in stale:
+            self.abs_path(rec).unlink(missing_ok=True)
+            removed.append(rec.version)
+        if removed:
+            with self._connect() as conn:
+                conn.executemany(
+                    "DELETE FROM saves WHERE user=? AND game=? AND version=?",
+                    [(user, game, v) for v in removed],
+                )
+        return removed
+
     # ----- deletes ------------------------------------------------------
     def delete_game(self, user: str, game: str) -> int:
         """Delete all versions of a game for a user, including bundle files.

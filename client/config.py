@@ -26,6 +26,8 @@ CONFIG_PATH = _config_dir() / "config.json"
 class ClientConfig:
     server: str
     token: str | None = None
+    # Requested version cap sent on upload (0 = let the server decide / unlimited).
+    retain: int = 0
     # Local manifest cache so we don't refetch from the server every run.
     manifest_cache: Path = dataclasses.field(
         default_factory=lambda: _config_dir() / "manifest.yaml"
@@ -47,11 +49,13 @@ class ClientConfig:
         resolved_token = (
             token or os.environ.get("LUDUCLONE_TOKEN") or file_cfg.get("token")
         )
-        return cls(server=resolved_server.rstrip("/"), token=resolved_token)
+        return cls(server=resolved_server.rstrip("/"), token=resolved_token,
+                   retain=int(file_cfg.get("retain") or 0))
 
     def save(self) -> None:
         CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
         CONFIG_PATH.write_text(
-            json.dumps({"server": self.server, "token": self.token}, indent=2),
+            json.dumps({"server": self.server, "token": self.token,
+                        "retain": self.retain}, indent=2),
             encoding="utf-8",
         )

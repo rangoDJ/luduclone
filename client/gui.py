@@ -1,29 +1,203 @@
 """Tkinter GUI for the luduclone client.
 
-Two tabs sharing one server connection:
-  * Back up  -- scan this machine and upload found saves
-  * Restore  -- probe the server, list available saves, and download+install
-                them individually or all at once
+A ludusavi-style window: each tab shows one searchable, checkable game list with
+an expandable file tree (per-entry, with sizes) and a running summary of what is
+selected. Tabs share one server connection:
+
+  * Back up  -- scan this machine, tick the games to upload, back them up
+  * Restore  -- probe the server, tick the games to download, restore them
 
 Operations run on a worker thread so the window stays responsive; output streams
 to a log box and a progress bar. Tkinter is stdlib, so this bundles into the exe.
 """
 from __future__ import annotations
 
-import os
 import queue
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog
 
 from .api import ApiClient
 from .backup import detect_env, run_backup
 from .config import ClientConfig, CONFIG_PATH
+from .custom import CustomConfig
 from .restore import restore_game
 from .roots import SteamIndex
 from .version import __version__
 from . import updater
 from shared import manifest as manifest_mod
+
+CHECKED = "☑"      # ☑
+UNCHECKED = "☐"    # ☐
+
+
+class GameList(ttk.Frame):
+    """A searchable, checkable, expandable list of games.
+
+    Top-level rows are games with a checkbox in the first column; each game can
+    be expanded to reveal its detail rows (save entries and individual files).
+    Column headers sort the games; the checkbox header toggles all. A filter box
+    hides games whose name doesn't match the typed text.
+    """
+
+    def __init__(self, parent, columns, *, on_change=None):
+        """``columns`` is a list of (key, heading, width, anchor, numeric)."""
+        super().__init__(parent)
+        self._cols = columns
+        self._on_change = on_change
+        self.checked: set[str] = set()
+        self.meta: dict[str, dict] = {}     # game name -> arbitrary metadata
+        self._sort_state: dict[str, bool] = {}
+
+        bar = ttk.Frame(self)
+        bar.pack(fill="x", pady=(0, 4))
+        ttk.Label(bar, text="Filter").pack(side="left")
+        self.search_var = tk.StringVar()
+        ent = ttk.Entry(bar, textvariable=self.search_var)
+        ent.pack(side="left", fill="x", expand=True, padx=6)
+        ent.bind("<KeyRelease>", lambda e: self._apply_filter())
+        ttk.Button(bar, text="All", width=4,
+                   command=lambda: self._set_all(True)).pack(side="left")
+        ttk.Button(bar, text="None", width=5,
+                   command=lambda: self._set_all(False)).pack(side="left", padx=(2, 0))
+
+        keys = [c[0] for c in columns]
+        self.tree = ttk.Treeview(self, columns=("check", *keys),
+                                 show="tree headings", selectmode="none")
+        self.tree.heading("#0", text="Game",
+                          command=lambda: self._sort_by("#0", False))
+        self.tree.column("#0", width=300, anchor="w")
+        self.tree.heading("check", text=CHECKED,
+                          command=lambda: self._set_all(self._mostly_unchecked()))
+        self.tree.column("check", width=34, anchor="center", stretch=False)
+        for key, heading, width, anchor, numeric in columns:
+            self.tree.heading(key, text=heading,
+                              command=lambda k=key, n=numeric: self._sort_by(k, n))
+            self.tree.column(key, width=width, anchor=anchor)
+
+        vsb = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        self.tree.bind("<Button-1>", self._on_click)
+
+    # ---- population ----------------------------------------------------
+    def clear(self) -> None:
+        self.tree.delete(*self.tree.get_children())
+        self.checked.clear()
+        self.meta.clear()
+        self._fire()
+
+    def add_game(self, name: str, values: tuple, *, checked: bool = True,
+                 meta: dict | None = None, children: list | None = None) -> None:
+        """Add one game row. ``children`` is a (possibly nested) list of
+        ``{"text": str, "values": tuple, "children": [...]}`` detail rows."""
+        glyph = CHECKED if checked else UNCHECKED
+        self.tree.insert("", "end", iid=name, text=name, values=(glyph, *values))
+        if checked:
+            self.checked.add(name)
+        self.meta[name] = meta or {}
+        for child in children or []:
+            self._add_child(name, child)
+
+    def set_children(self, name: str, children: list) -> None:
+        """Replace a game's detail rows (e.g. with a fresh restore diff)."""
+        if name not in self.meta:
+            return
+        for c in self.tree.get_children(name):
+            self.tree.delete(c)
+        for child in children or []:
+            self._add_child(name, child)
+        self.tree.item(name, open=True)
+
+    def _add_child(self, parent_iid: str, node: dict) -> None:
+        pad = ("",) * len(self._cols)
+        vals = node.get("values") or pad
+        iid = self.tree.insert(parent_iid, "end", text=node.get("text", ""),
+                               values=("", *vals))
+        for sub in node.get("children") or []:
+            self._add_child(iid, sub)
+
+    def finish(self) -> None:
+        self._apply_filter()
+        self._fire()
+
+    # ---- checkbox handling --------------------------------------------
+    def _on_click(self, event) -> None:
+        region = self.tree.identify_region(event.x, event.y)
+        if region != "cell":
+            return
+        if self.tree.identify_column(event.x) != "#1":   # the check column
+            return
+        iid = self.tree.identify_row(event.y)
+        if not iid or self.tree.parent(iid):             # only top-level games
+            return
+        self._toggle(iid)
+
+    def _toggle(self, iid: str) -> None:
+        if iid in self.checked:
+            self.checked.discard(iid)
+            glyph = UNCHECKED
+        else:
+            self.checked.add(iid)
+            glyph = CHECKED
+        vals = list(self.tree.item(iid, "values"))
+        vals[0] = glyph
+        self.tree.item(iid, values=vals)
+        self._fire()
+
+    def _set_all(self, on: bool) -> None:
+        for iid in self.tree.get_children():
+            want = on and (iid in self._visible())
+            is_on = iid in self.checked
+            if want != is_on:
+                self._toggle(iid)
+
+    def _mostly_unchecked(self) -> bool:
+        vis = self._visible()
+        return len(self.checked & vis) * 2 <= len(vis)
+
+    def _visible(self) -> set[str]:
+        return set(self.tree.get_children())
+
+    def get_checked(self) -> list[str]:
+        # All checked games, including any currently hidden by the filter, so a
+        # search term never silently drops a selection.
+        return [g for g in sorted(self.meta, key=str.lower) if g in self.checked]
+
+    # ---- filtering -----------------------------------------------------
+    def _apply_filter(self) -> None:
+        needle = self.search_var.get().strip().lower()
+        # Reattach matches in their original (alphabetical) order, detach the rest.
+        for name in sorted(self.meta, key=str.lower):
+            if not needle or needle in name.lower():
+                self.tree.reattach(name, "", "end")
+            else:
+                self.tree.detach(name)
+        self._fire()
+
+    # ---- sorting -------------------------------------------------------
+    def _sort_by(self, col: str, numeric: bool) -> None:
+        desc = self._sort_state.get(col, False)
+        items = list(self.tree.get_children())
+
+        def keyfn(iid):
+            if col == "#0":
+                return self.tree.item(iid, "text").lower()
+            raw = self.meta.get(iid, {}).get(f"sort_{col}")
+            if raw is None:
+                raw = self.tree.set(iid, col)
+            return raw if numeric else str(raw).lower()
+
+        items.sort(key=keyfn, reverse=desc)
+        for i, iid in enumerate(items):
+            self.tree.move(iid, "", i)
+        self._sort_state[col] = not desc
+
+    # ---- summary -------------------------------------------------------
+    def _fire(self) -> None:
+        if self._on_change:
+            self._on_change()
 
 
 class App:
@@ -31,8 +205,8 @@ class App:
         self.root = root
         updater.cleanup_old()  # clear any leftover *.old from a prior self-update
         root.title(f"luduclone {__version__}")
-        root.geometry("720x600")
-        root.minsize(620, 480)
+        root.geometry("780x640")
+        root.minsize(660, 520)
 
         self._log_q: queue.Queue[str] = queue.Queue()
         self._busy = False
@@ -40,24 +214,24 @@ class App:
         self._remote_games: list[dict] = []
         self._buttons: list[ttk.Button] = []
 
-        server, token = "", ""
+        server, token, retain = "", "", 0
         try:
             cfg = ClientConfig.load()
-            server, token = cfg.server, cfg.token or ""
+            server, token, retain = cfg.server, cfg.token or "", cfg.retain
         except SystemExit:
             pass
 
         self.server_var = tk.StringVar(value=server)
         self.token_var = tk.StringVar(value=token)
-        self.game_var = tk.StringVar()
+        self.retain_var = tk.StringVar(value=str(retain))
         self.config_var = tk.BooleanVar(value=False)
         self.refresh_var = tk.BooleanVar(value=False)
         self.mode_var = tk.StringVar(value="auto")
         self.noreg_var = tk.BooleanVar(value=False)
+        self.custom = CustomConfig.load()
 
         self._build(root)
         self.root.after(100, self._tick)
-        # Non-blocking check for a newer release on startup.
         threading.Thread(target=self._check_updates, args=(False,), daemon=True).start()
 
     # ---- layout --------------------------------------------------------
@@ -87,6 +261,7 @@ class App:
         nb.pack(fill="both", expand=True, **pad)
         nb.add(self._backup_tab(nb), text="Back up")
         nb.add(self._restore_tab(nb), text="Restore")
+        nb.add(self._custom_tab(nb), text="Custom")
 
         prog = ttk.Frame(root)
         prog.pack(fill="x", **pad)
@@ -95,8 +270,8 @@ class App:
         self.prog_label = ttk.Label(prog, text="", width=26, anchor="w")
         self.prog_label.pack(side="left", padx=8)
 
-        self.log = tk.Text(root, height=9, wrap="word", state="disabled")
-        self.log.pack(fill="both", expand=True, padx=8, pady=(0, 4))
+        self.log = tk.Text(root, height=7, wrap="word", state="disabled")
+        self.log.pack(fill="both", expand=False, padx=8, pady=(0, 4))
 
         self.status = ttk.Label(root, text="Ready", anchor="w", relief="sunken")
         self.status.pack(fill="x", side="bottom")
@@ -105,14 +280,23 @@ class App:
         f = ttk.Frame(nb)
         opts = ttk.Frame(f)
         opts.pack(fill="x", pady=6)
-        ttk.Label(opts, text="Only game (optional)").pack(side="left")
-        ttk.Entry(opts, textvariable=self.game_var, width=22).pack(side="left", padx=6)
+        self._mkbtn(opts, "Scan this PC", self.on_scan).pack(side="left")
+        self._mkbtn(opts, "Back up checked", self.on_backup).pack(side="left", padx=6)
         ttk.Checkbutton(opts, text="Include config", variable=self.config_var).pack(side="left", padx=6)
         ttk.Checkbutton(opts, text="Refresh manifest", variable=self.refresh_var).pack(side="left", padx=6)
-        btns = ttk.Frame(f)
-        btns.pack(fill="x")
-        self._mkbtn(btns, "Scan (preview)", self.on_scan).pack(side="left")
-        self._mkbtn(btns, "Back up & upload", self.on_backup).pack(side="left", padx=6)
+        ttk.Label(opts, text="Keep last").pack(side="left", padx=(6, 2))
+        ttk.Spinbox(opts, from_=0, to=999, width=4,
+                    textvariable=self.retain_var).pack(side="left")
+        ttk.Label(opts, text="(0 = all)").pack(side="left", padx=(2, 0))
+        self.backup_list = GameList(
+            f,
+            [("files", "Files", 70, "center", True),
+             ("size", "Size", 90, "e", True)],
+            on_change=self._update_backup_summary,
+        )
+        self.backup_list.pack(fill="both", expand=True)
+        self.backup_summary = ttk.Label(f, text="Scan to discover saves on this machine.")
+        self.backup_summary.pack(fill="x", pady=(4, 0))
         return f
 
     def _restore_tab(self, nb) -> ttk.Frame:
@@ -120,31 +304,180 @@ class App:
         bar = ttk.Frame(f)
         bar.pack(fill="x", pady=6)
         self._mkbtn(bar, "Refresh from server", self.on_refresh_remote).pack(side="left")
-        self._mkbtn(bar, "Restore selected", self.on_restore_selected).pack(side="left", padx=6)
-        self._mkbtn(bar, "Restore all", self.on_restore_all).pack(side="left")
+        self._mkbtn(bar, "Preview", self.on_preview_restore).pack(side="left", padx=6)
+        self._mkbtn(bar, "Restore checked", self.on_restore_selected).pack(side="left")
         ttk.Label(bar, text="Mode").pack(side="left", padx=(12, 2))
         ttk.Combobox(bar, textvariable=self.mode_var, width=8, state="readonly",
                      values=("auto", "proton", "native", "windows")).pack(side="left")
         ttk.Checkbutton(bar, text="No registry", variable=self.noreg_var).pack(side="left", padx=6)
-
-        cols = ("versions", "latest", "updated")
-        self.tree = ttk.Treeview(f, columns=cols, show="tree headings", selectmode="extended")
-        self.tree.heading("#0", text="Game")
-        self.tree.heading("versions", text="Versions")
-        self.tree.heading("latest", text="Latest")
-        self.tree.heading("updated", text="Last updated")
-        self.tree.column("#0", width=300)
-        self.tree.column("versions", width=70, anchor="center")
-        self.tree.column("latest", width=60, anchor="center")
-        self.tree.column("updated", width=160)
-        self.tree.pack(fill="both", expand=True)
-        self.tree.bind("<Double-1>", lambda e: self.on_restore_selected())
+        self.restore_list = GameList(
+            f,
+            [("versions", "Versions", 70, "center", True),
+             ("latest", "Latest", 60, "center", True),
+             ("updated", "Last updated", 150, "w", False)],
+            on_change=self._update_restore_summary,
+        )
+        self.restore_list.pack(fill="both", expand=True)
+        self.restore_summary = ttk.Label(f, text="Refresh from the server to list backups.")
+        self.restore_summary.pack(fill="x", pady=(4, 0))
         return f
+
+    def _custom_tab(self, nb) -> ttk.Frame:
+        """Editors for custom games, restore redirects, and backup ignores —
+        ludusavi's 'Custom games' / 'Other' settings. Saved immediately; a fresh
+        Scan / Refresh picks up the changes."""
+        f = ttk.Frame(nb)
+
+        gframe = ttk.LabelFrame(f, text="Custom games (extra/overriding manifest)")
+        gframe.pack(fill="both", expand=True, padx=4, pady=4)
+        self.cg_list = tk.Listbox(gframe, height=6)
+        self.cg_list.pack(side="left", fill="both", expand=True, padx=4, pady=4)
+        gb = ttk.Frame(gframe)
+        gb.pack(side="left", fill="y", padx=4)
+        ttk.Button(gb, text="Add…", command=self.on_add_custom_game).pack(fill="x")
+        ttk.Button(gb, text="Remove", command=self.on_rm_custom_game).pack(fill="x", pady=2)
+
+        rframe = ttk.LabelFrame(f, text="Restore redirects (source path → target path)")
+        rframe.pack(fill="both", expand=True, padx=4, pady=4)
+        self.rd_list = tk.Listbox(rframe, height=4)
+        self.rd_list.pack(side="left", fill="both", expand=True, padx=4, pady=4)
+        rb = ttk.Frame(rframe)
+        rb.pack(side="left", fill="y", padx=4)
+        ttk.Button(rb, text="Add…", command=self.on_add_redirect).pack(fill="x")
+        ttk.Button(rb, text="Remove", command=self.on_rm_redirect).pack(fill="x", pady=2)
+
+        iframe = ttk.LabelFrame(f, text="Backup ignore globs (e.g. */cache/*, *.tmp)")
+        iframe.pack(fill="both", expand=True, padx=4, pady=4)
+        self.ig_list = tk.Listbox(iframe, height=4)
+        self.ig_list.pack(side="left", fill="both", expand=True, padx=4, pady=4)
+        ib = ttk.Frame(iframe)
+        ib.pack(side="left", fill="y", padx=4)
+        ttk.Button(ib, text="Add…", command=self.on_add_ignore).pack(fill="x")
+        ttk.Button(ib, text="Remove", command=self.on_rm_ignore).pack(fill="x", pady=2)
+
+        self._refresh_custom_lists()
+        return f
+
+    def _refresh_custom_lists(self) -> None:
+        self.cg_list.delete(0, "end")
+        for g in self.custom.games:
+            sid = f", steam {g['steam_id']}" if g.get("steam_id") else ""
+            self.cg_list.insert("end", f"{g.get('name')}  "
+                                f"({len(g.get('files') or [])} path(s){sid})")
+        self.rd_list.delete(0, "end")
+        for r in self.custom.redirects:
+            self.rd_list.insert("end", f"{r.get('source')}  →  {r.get('target')}")
+        self.ig_list.delete(0, "end")
+        for pat in self.custom.ignores:
+            self.ig_list.insert("end", pat)
+
+    def on_add_custom_game(self) -> None:
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Add custom game")
+        dlg.transient(self.root)
+        dlg.grab_set()
+        name_var = tk.StringVar()
+        sid_var = tk.StringVar()
+        ttk.Label(dlg, text="Name").grid(row=0, column=0, sticky="w", padx=6, pady=4)
+        ttk.Entry(dlg, textvariable=name_var, width=46).grid(row=0, column=1, padx=6, pady=4)
+        ttk.Label(dlg, text="Save paths\n(one per line)").grid(row=1, column=0, sticky="nw", padx=6)
+        paths_txt = tk.Text(dlg, width=50, height=6)
+        paths_txt.grid(row=1, column=1, padx=6, pady=4)
+        ttk.Label(dlg, text="Registry keys\n(one per line)").grid(row=2, column=0, sticky="nw", padx=6)
+        reg_txt = tk.Text(dlg, width=50, height=3)
+        reg_txt.grid(row=2, column=1, padx=6, pady=4)
+        ttk.Label(dlg, text="Steam app id\n(optional)").grid(row=3, column=0, sticky="w", padx=6)
+        ttk.Entry(dlg, textvariable=sid_var, width=14).grid(row=3, column=1, sticky="w", padx=6, pady=4)
+        ttk.Label(dlg, text="Paths accept manifest placeholders like <home>, <winDocuments>.",
+                  foreground="gray").grid(row=4, column=0, columnspan=2, padx=6)
+
+        def save():
+            name = name_var.get().strip()
+            if not name:
+                messagebox.showerror("luduclone", "Enter a name.", parent=dlg)
+                return
+            files = [ln.strip() for ln in paths_txt.get("1.0", "end").splitlines() if ln.strip()]
+            regs = [ln.strip() for ln in reg_txt.get("1.0", "end").splitlines() if ln.strip()]
+            sid = sid_var.get().strip()
+            self.custom.games = [g for g in self.custom.games if g.get("name") != name]
+            self.custom.games.append({"name": name, "files": files, "registry": regs,
+                                      "steam_id": int(sid) if sid.isdigit() else None})
+            self.custom.save()
+            self._refresh_custom_lists()
+            dlg.destroy()
+
+        btns = ttk.Frame(dlg)
+        btns.grid(row=5, column=0, columnspan=2, pady=8)
+        ttk.Button(btns, text="Save", command=save).pack(side="left", padx=4)
+        ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side="left", padx=4)
+
+    def on_rm_custom_game(self) -> None:
+        i = self._sel(self.cg_list)
+        if i is not None:
+            del self.custom.games[i]
+            self.custom.save()
+            self._refresh_custom_lists()
+
+    def on_add_redirect(self) -> None:
+        src = simpledialog.askstring("Redirect", "Source path prefix:", parent=self.root)
+        if not src:
+            return
+        tgt = simpledialog.askstring("Redirect", "Target path prefix:", parent=self.root)
+        if not tgt:
+            return
+        self.custom.redirects.append({"source": src.strip(), "target": tgt.strip()})
+        self.custom.save()
+        self._refresh_custom_lists()
+
+    def on_rm_redirect(self) -> None:
+        i = self._sel(self.rd_list)
+        if i is not None:
+            del self.custom.redirects[i]
+            self.custom.save()
+            self._refresh_custom_lists()
+
+    def on_add_ignore(self) -> None:
+        pat = simpledialog.askstring("Ignore", "Glob pattern (e.g. */cache/*):",
+                                     parent=self.root)
+        if pat and pat.strip():
+            self.custom.ignores.append(pat.strip())
+            self.custom.save()
+            self._refresh_custom_lists()
+
+    def on_rm_ignore(self) -> None:
+        i = self._sel(self.ig_list)
+        if i is not None:
+            del self.custom.ignores[i]
+            self.custom.save()
+            self._refresh_custom_lists()
+
+    @staticmethod
+    def _sel(listbox: tk.Listbox):
+        sel = listbox.curselection()
+        return sel[0] if sel else None
 
     def _mkbtn(self, parent, text, cmd) -> ttk.Button:
         b = ttk.Button(parent, text=text, command=cmd)
         self._buttons.append(b)
         return b
+
+    # ---- summaries -----------------------------------------------------
+    def _update_backup_summary(self) -> None:
+        gl = self.backup_list
+        checked = gl.get_checked()
+        files = sum(gl.meta[g].get("files", 0) for g in checked)
+        size = sum(gl.meta[g].get("bytes", 0) for g in checked)
+        total = len(gl.meta)
+        self.backup_summary.configure(
+            text=f"{len(checked)} of {total} game(s) checked  —  "
+                 f"{files} files, {_human(size)}")
+
+    def _update_restore_summary(self) -> None:
+        gl = self.restore_list
+        checked = gl.get_checked()
+        total = len(gl.meta)
+        self.restore_summary.configure(
+            text=f"{len(checked)} of {total} game(s) checked for restore")
 
     # ---- log + progress (thread-safe) ----------------------------------
     def log_line(self, text: str) -> None:
@@ -213,8 +546,10 @@ class App:
         if not server:
             messagebox.showerror("luduclone", "Enter a server URL first.")
             return None
+        retain = self.retain_var.get().strip()
         return ClientConfig(server=server.rstrip("/"),
-                            token=self.token_var.get().strip() or None)
+                            token=self.token_var.get().strip() or None,
+                            retain=int(retain) if retain.isdigit() else 0)
 
     def _load_manifest(self, cfg: ClientConfig):
         api = ApiClient(cfg)
@@ -222,14 +557,11 @@ class App:
             self.log_line("Downloading manifest from server…")
             api.fetch_manifest(progress=lambda d, t: self.set_progress(d, t, "Downloading manifest"))
         manifest = manifest_mod.Manifest.from_yaml(cfg.manifest_cache.read_text(encoding="utf-8"))
+        CustomConfig.load().merge_into(manifest)
         return api, manifest
 
     def _tags(self):
         return {"save", "config"} if self.config_var.get() else {"save"}
-
-    def _only(self):
-        g = self.game_var.get().strip()
-        return [g] if g else None
 
     # ---- config / connect ---------------------------------------------
     def on_save(self) -> None:
@@ -254,33 +586,49 @@ class App:
         api, manifest = self._load_manifest(cfg)
         env = detect_env()
         self.log_line(f"Scanning {len(manifest)} games on {env.os}…")
-        report = run_backup(api, manifest, env, tags=self._tags(), only=self._only(),
-                            dry_run=True,
+        report = run_backup(api, manifest, env, tags=self._tags(), dry_run=True,
                             progress=lambda i, t, n: self.set_progress(i, t, "Scanning"))
-        if not report:
-            self.log_line("No save data found on this machine.")
-            return
-        self.log_line(f"Found saves for {len(report)} game(s):")
-        for r in sorted(report, key=lambda r: r["game"]):
-            reg = f"  +{r['registry']} reg" if r.get("registry") else ""
-            self.log_line(f"  {r['game']}  —  {r['files']} files, {_human(r['bytes'])}{reg}")
+        self.root.after(0, lambda: self._populate_backup(report))
+        self.log_line(f"Found saves for {len(report)} game(s).")
+
+    def _populate_backup(self, report: list[dict]) -> None:
+        gl = self.backup_list
+        gl.clear()
+        for r in sorted(report, key=lambda r: r["game"].lower()):
+            children = [_entry_node(e) for e in r.get("entries", [])]
+            if r.get("registry"):
+                children.append({"text": f"+{r['registry']} registry key(s)",
+                                 "values": ("", "")})
+            gl.add_game(
+                r["game"], (r["files"], _human(r["bytes"])),
+                meta={"files": r["files"], "bytes": r["bytes"],
+                      "sort_files": r["files"], "sort_size": r["bytes"]},
+                children=children,
+            )
+        gl.finish()
 
     def on_backup(self) -> None:
         cfg = self._cfg()
-        if cfg:
-            self._run(self._backup, cfg)
+        if not cfg:
+            return
+        names = self.backup_list.get_checked()
+        if not names:
+            messagebox.showinfo("luduclone", "Scan, then check the games to back up.")
+            return
+        self._run(self._backup, cfg, names)
 
-    def _backup(self, cfg: ClientConfig) -> None:
+    def _backup(self, cfg: ClientConfig, names: list[str]) -> None:
         api, manifest = self._load_manifest(cfg)
         env = detect_env()
-        self.log_line(f"Backing up from {env.os}…")
-        report = run_backup(api, manifest, env, tags=self._tags(), only=self._only(),
+        self.log_line(f"Backing up {len(names)} game(s) from {env.os}…")
+        report = run_backup(api, manifest, env, tags=self._tags(), only=names,
                             progress=lambda i, t, n: self.set_progress(i, t, "Backing up"))
         uploaded = [r for r in report if r["status"] == "uploaded"]
         for r in sorted(uploaded, key=lambda r: r["game"]):
             reg = f"  +{r['registry']} reg" if r.get("registry") else ""
+            pruned = f"  (pruned {len(r['pruned'])} old)" if r.get("pruned") else ""
             self.log_line(f"  uploaded {r['game']}  v{r['version']}  {r['files']} files, "
-                          f"{_human(r['bytes'])}{reg}")
+                          f"{_human(r['bytes'])}{reg}{pruned}")
         self.log_line(f"Done. Uploaded {len(uploaded)} game(s).")
         self._refresh_remote(cfg)
 
@@ -293,28 +641,53 @@ class App:
     def _refresh_remote(self, cfg: ClientConfig) -> None:
         games = ApiClient(cfg).list_games()
         self._remote_games = games
-        self.root.after(0, self._populate_tree)
+        self.root.after(0, self._populate_restore)
         self.log_line(f"Server has {len(games)} game(s) with backups.")
 
-    def _populate_tree(self) -> None:
-        self.tree.delete(*self.tree.get_children())
+    def _populate_restore(self) -> None:
+        gl = self.restore_list
+        gl.clear()
         for g in sorted(self._remote_games, key=lambda g: g["game"].lower()):
-            self.tree.insert("", "end", iid=g["game"], text=g["game"],
-                             values=(g["versions"], f"v{g['latest']}", _fmt_time(g.get("updated"))))
+            updated = _fmt_time(g.get("updated"))
+            gl.add_game(
+                g["game"], (g["versions"], f"v{g['latest']}", updated),
+                meta={"sort_versions": g["versions"], "sort_latest": g["latest"],
+                      "sort_updated": g.get("updated") or 0},
+            )
+        gl.finish()
+
+    def on_preview_restore(self) -> None:
+        names = self.restore_list.get_checked()
+        if not names:
+            messagebox.showinfo("luduclone", "Refresh, then check the games to preview.")
+            return
+        cfg = self._cfg()
+        if cfg:
+            self._run(self._preview_restore, cfg, names)
+
+    def _preview_restore(self, cfg: ClientConfig, names: list[str]) -> None:
+        api, manifest = self._load_manifest(cfg)
+        index = SteamIndex.build()
+        total = len(names)
+        self.log_line(f"Previewing restore of {total} game(s) (mode: {self.mode_var.get()})…")
+        for i, name in enumerate(names, 1):
+            self.set_progress(i, total, "Previewing")
+            res = restore_game(api, manifest, name, mode=self.mode_var.get(),
+                               preview=True, do_registry=not self.noreg_var.get(),
+                               steam_index=index)
+            self.root.after(0, lambda n=name, r=res: self.restore_list.set_children(
+                n, _diff_nodes(r)))
+            new = sum(o.new for o in res.entries)
+            changed = sum(o.changed for o in res.entries)
+            self.log_line(f"  {name}: {res.status}"
+                          + (f" via {res.mode}" if res.mode else "")
+                          + f"  ({new} new, {changed} changed)")
+        self.log_line("Preview done. Expand a game to see the file diff.")
 
     def on_restore_selected(self) -> None:
-        names = list(self.tree.selection())
+        names = self.restore_list.get_checked()
         if not names:
-            messagebox.showinfo("luduclone", "Select one or more games in the list first.")
-            return
-        self._start_restore(names)
-
-    def on_restore_all(self) -> None:
-        names = [g["game"] for g in self._remote_games]
-        if not names:
-            messagebox.showinfo("luduclone", "Refresh from the server first.")
-            return
-        if not messagebox.askyesno("luduclone", f"Restore all {len(names)} game(s)?"):
+            messagebox.showinfo("luduclone", "Refresh, then check the games to restore.")
             return
         self._start_restore(names)
 
@@ -336,13 +709,19 @@ class App:
             detail = f" ({res.detail})" if res.detail else ""
             self.log_line(f"  {name}: {res.status}"
                           + (f" via {res.mode}" if res.mode else "") + detail)
+            new = sum(o.new for o in res.entries)
+            changed = sum(o.changed for o in res.entries)
+            same = sum(o.identical for o in res.entries)
+            if res.status == "restored":
+                self.log_line(f"      {new} new, {changed} changed, {same} unchanged")
+            if res.undo_dir:
+                self.log_line(f"      undo: {res.undo_dir}")
             for o in res.entries:
                 if o.status != "restored":
                     self.log_line(f"      [{o.status}] {o.template}")
             if res.status == "restored":
                 ok += 1
         self.log_line(f"Done. Restored {ok}/{total} game(s).")
-
 
     # ---- updates -------------------------------------------------------
     def on_check_updates(self) -> None:
@@ -393,6 +772,34 @@ class App:
     def _popup(self, fn) -> None:
         """Schedule a dialog on the Tk main thread."""
         self.root.after(0, fn)
+
+
+def _diff_nodes(res) -> list:
+    """Tree rows describing a restore preview: a header, then one row per entry
+    with its changed/new files nested beneath."""
+    head = f"mode: {res.mode or '-'}   target: {res.target_root or '-'}"
+    nodes = [{"text": head}]
+    for o in res.entries:
+        if o.status != "restored":
+            nodes.append({"text": f"[{o.status}] {o.template}"})
+            continue
+        files = [{"text": f"{d['status']}: {d['rel']}  ({_human(d['size'])})"}
+                 for d in o.file_diffs if d["status"] != "identical"]
+        label = f"{o.template}  —  {o.new} new, {o.changed} changed, {o.identical} same"
+        nodes.append({"text": label, "children": files})
+    if res.registry_files:
+        nodes.append({"text": f"registry: {', '.join(res.registry_files)}"})
+    return nodes
+
+
+def _entry_node(entry: dict) -> dict:
+    """Build a tree node for one save entry, with its files nested beneath."""
+    files = entry.get("files", [])
+    total = sum(f.get("size", 0) for f in files)
+    file_nodes = [{"text": f["path"], "values": ("", _human(f.get("size", 0)))}
+                  for f in files]
+    return {"text": entry["template"], "values": (len(files), _human(total)),
+            "children": file_nodes}
 
 
 def _human(n: int) -> str:

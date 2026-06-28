@@ -58,10 +58,13 @@ class ApiClient:
         return r.json()
 
     def upload(self, game: str, bundle_path: Path, source_os: str, mapping: dict) -> dict:
+        data = {"source_os": source_os, "mapping": json.dumps(mapping)}
+        if self.cfg.retain and self.cfg.retain > 0:
+            data["retain"] = str(self.cfg.retain)
         with open(bundle_path, "rb") as f:
             r = self.session.post(
                 self._url(f"/games/{game}/saves"),
-                data={"source_os": source_os, "mapping": json.dumps(mapping)},
+                data=data,
                 files={"bundle": (f"{game}.tar.gz", f, "application/gzip")},
                 timeout=600,
             )

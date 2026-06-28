@@ -133,11 +133,16 @@ async def upload_save(
     game: str,
     source_os: str = Form(...),
     mapping: str = Form("{}"),
+    retain: int = Form(0),
     bundle: UploadFile = File(...),
     user: str = Depends(current_user),
 ) -> dict:
     """Accept a save bundle (.tar.gz) plus a JSON mapping describing how each
     file maps back to a manifest placeholder, so the other OS can retarget it.
+
+    ``retain`` is the client's requested version cap; combined with the server's
+    ``LUDUCLONE_RETAIN`` default, the stricter (smaller positive) limit prunes
+    older versions after this one is stored.
     """
     if source_os not in ("windows", "linux"):
         raise HTTPException(400, "source_os must be 'windows' or 'linux'")
@@ -172,7 +177,16 @@ async def upload_save(
         user=user, game=game, version=version, source_os=source_os,
         sha256=sha.hexdigest(), size=size, mapping=mapping, path=dest,
     )
-    return {"game": game, **rec.to_public()}
+    keep = _effective_retain(retain, config.RETAIN)
+    pruned = store.prune(user, game, keep) if keep else []
+    return {"game": game, **rec.to_public(), "pruned": pruned}
+
+
+def _effective_retain(requested: int, default: int) -> int:
+    """The stricter of the client's request and the server default; 0 (either
+    side) means 'no limit from that side'."""
+    limits = [n for n in (requested, default) if n and n > 0]
+    return min(limits) if limits else 0
 
 
 @app.get("/games/{game}/saves/latest")

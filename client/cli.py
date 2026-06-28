@@ -24,6 +24,7 @@ from shared import manifest as manifest_mod
 from .api import ApiClient
 from .backup import detect_env, run_backup
 from .config import ClientConfig
+from .custom import CustomConfig, CUSTOM_PATH
 from .restore import restore_game
 from .version import __version__
 from . import updater
@@ -39,17 +40,21 @@ def _human(n: int) -> str:
 
 
 def _load(cfg, force_remote=False):
-    """Load the manifest from local cache, else fetch from the server."""
+    """Load the manifest from local cache (else fetch), then layer the user's
+    custom games on top so they're scannable/restorable like any other game."""
     api = ApiClient(cfg)
     if force_remote or not cfg.manifest_cache.exists():
         api.fetch_manifest()
-    return api, manifest_mod.Manifest.from_yaml(
+    manifest = manifest_mod.Manifest.from_yaml(
         cfg.manifest_cache.read_text(encoding="utf-8")
     )
+    CustomConfig.load().merge_into(manifest)
+    return api, manifest
 
 
 def cmd_configure(args) -> int:
-    cfg = ClientConfig(server=args.server.rstrip("/"), token=args.token)
+    cfg = ClientConfig(server=args.server.rstrip("/"), token=args.token,
+                       retain=args.retain or 0)
     cfg.save()
     api = ApiClient(cfg)
     try:
@@ -87,8 +92,9 @@ def cmd_backup(args) -> int:
     uploaded = [r for r in report if r["status"] == "uploaded"]
     for r in sorted(uploaded, key=lambda r: r["game"]):
         reg = f"  +{r['registry']} reg" if r.get("registry") else ""
+        pruned = f"  (pruned {len(r['pruned'])} old)" if r.get("pruned") else ""
         print(f"  uploaded {r['game']:<38} v{r['version']}  "
-              f"{r['files']} files  {_human(r['bytes'])}{reg}")
+              f"{r['files']} files  {_human(r['bytes'])}{reg}{pruned}")
     print(f"Done. Uploaded {len(uploaded)} game(s) from {env.os}.")
     return 0
 
@@ -109,19 +115,38 @@ def cmd_restore(args) -> int:
     any_fail = False
     for name in names:
         res = restore_game(api, manifest, name, version=args.version, mode=args.mode,
-                           dry_run=args.dry_run, do_registry=not args.no_registry,
-                           steam_index=index)
+                           dry_run=args.dry_run, preview=args.preview,
+                           do_registry=not args.no_registry, steam_index=index)
         mode = f" via {res.mode}" if res.mode else ""
         print(f"{name}: {res.status}{mode}" + (f" ({res.detail})" if res.detail else ""))
         if res.target_root:
             print(f"    target: {res.target_root}")
         for o in res.entries:
-            print(f"    [{o.status}] {o.template} -> {o.target} ({o.files} files)")
+            counts = _fmt_counts(o)
+            print(f"    [{o.status}] {o.template} -> {o.target} ({o.files} files{counts})")
+            if args.preview:
+                for d in o.file_diffs:
+                    if d["status"] != "identical":
+                        print(f"        {d['status']:<9} {d['rel']} ({_human(d['size'])})")
         for rf in res.registry_files:
             print(f"    [registry] {rf}")
+        if res.undo_dir:
+            print(f"    undo: {res.undo_dir}")
         if res.status in ("error", "no-target", "not-on-server"):
             any_fail = True
     return 1 if any_fail else 0
+
+
+def _fmt_counts(o) -> str:
+    """Render the new/changed/identical breakdown of one restored entry."""
+    parts = []
+    if o.new:
+        parts.append(f"{o.new} new")
+    if o.changed:
+        parts.append(f"{o.changed} changed")
+    if o.identical:
+        parts.append(f"{o.identical} unchanged")
+    return f"; {', '.join(parts)}" if parts else ""
 
 
 def cmd_update(args) -> int:
@@ -208,6 +233,75 @@ def _tags(args):
     return tags
 
 
+# ---- custom games / redirects / ignores ------------------------------------
+def cmd_custom_list(args) -> int:
+    cc = CustomConfig.load()
+    print(f"Custom games ({len(cc.games)}):")
+    for g in cc.games:
+        sid = f", steam {g['steam_id']}" if g.get("steam_id") else ""
+        print(f"  {g.get('name')}  ({len(g.get('files') or [])} path(s){sid})")
+        for p in g.get("files") or []:
+            print(f"      {p}")
+    print(f"Redirects ({len(cc.redirects)}):")
+    for i, r in enumerate(cc.redirects):
+        print(f"  [{i}] {r.get('source')}  ->  {r.get('target')}")
+    print(f"Ignores ({len(cc.ignores)}):")
+    for i, pat in enumerate(cc.ignores):
+        print(f"  [{i}] {pat}")
+    print(f"\n(stored in {CUSTOM_PATH})")
+    return 0
+
+
+def cmd_custom_add_game(args) -> int:
+    cc = CustomConfig.load()
+    cc.games = [g for g in cc.games if g.get("name") != args.name]
+    cc.games.append({"name": args.name, "files": args.path or [],
+                     "registry": args.registry or [], "steam_id": args.steam_id})
+    cc.save()
+    print(f"Saved custom game {args.name!r} ({len(args.path or [])} path(s)).")
+    return 0
+
+
+def cmd_custom_rm_game(args) -> int:
+    cc = CustomConfig.load()
+    before = len(cc.games)
+    cc.games = [g for g in cc.games if g.get("name") != args.name]
+    cc.save()
+    if len(cc.games) == before:
+        print(f"No custom game named {args.name!r}.", file=sys.stderr)
+        return 1
+    print(f"Removed custom game {args.name!r}.")
+    return 0
+
+
+def cmd_custom_add_redirect(args) -> int:
+    cc = CustomConfig.load()
+    cc.redirects.append({"source": args.source, "target": args.target})
+    cc.save()
+    print(f"Added redirect {args.source} -> {args.target}.")
+    return 0
+
+
+def cmd_custom_add_ignore(args) -> int:
+    cc = CustomConfig.load()
+    cc.ignores.append(args.pattern)
+    cc.save()
+    print(f"Added ignore pattern {args.pattern!r}.")
+    return 0
+
+
+def cmd_custom_rm(args) -> int:
+    cc = CustomConfig.load()
+    lst = cc.redirects if args.what == "redirect" else cc.ignores
+    if not (0 <= args.index < len(lst)):
+        print(f"Index {args.index} out of range (have {len(lst)}).", file=sys.stderr)
+        return 1
+    lst.pop(args.index)
+    cc.save()
+    print(f"Removed {args.what} [{args.index}].")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="luduclone", description="Cross-OS game-save sync client")
     p.add_argument("--server", help="Server base URL (overrides config/env)")
@@ -218,6 +312,8 @@ def build_parser() -> argparse.ArgumentParser:
     c = sub.add_parser("configure", help="Save server URL + token")
     c.add_argument("--server", required=True)
     c.add_argument("--token")
+    c.add_argument("--retain", type=int, default=0,
+                   help="Keep at most this many backup versions per game (0 = unlimited)")
     c.set_defaults(func=cmd_configure)
 
     for name, func, help_ in (
@@ -238,6 +334,8 @@ def build_parser() -> argparse.ArgumentParser:
     re_.add_argument("--no-registry", action="store_true",
                      help="Skip merging registry keys into the Proton prefix")
     re_.add_argument("--dry-run", action="store_true", help="Show targets without writing")
+    re_.add_argument("--preview", action="store_true",
+                     help="Show a per-file diff (new/changed/unchanged) without writing")
     re_.add_argument("--refresh", action="store_true", help="Refetch manifest from server")
     re_.set_defaults(func=cmd_restore)
 
@@ -254,6 +352,34 @@ def build_parser() -> argparse.ArgumentParser:
     up = sub.add_parser("update", help="Check for and install client updates")
     up.add_argument("--apply", action="store_true", help="Download and install if newer")
     up.set_defaults(func=cmd_update)
+
+    cu = sub.add_parser("custom", help="Manage custom games, redirects, ignore filters")
+    cusub = cu.add_subparsers(dest="custom_cmd", required=True)
+    cusub.add_parser("list", help="Show the custom config").set_defaults(func=cmd_custom_list)
+    ag = cusub.add_parser("add-game", help="Add or replace a custom game")
+    ag.add_argument("name")
+    ag.add_argument("--path", action="append",
+                    help="Save path/template, e.g. '<home>/.mygame' (repeatable)")
+    ag.add_argument("--registry", action="append", help="Registry key (repeatable)")
+    ag.add_argument("--steam-id", type=int, dest="steam_id",
+                    help="Steam app id, to anchor <base>/<root> on restore")
+    ag.set_defaults(func=cmd_custom_add_game)
+    rg = cusub.add_parser("rm-game", help="Remove a custom game")
+    rg.add_argument("name")
+    rg.set_defaults(func=cmd_custom_rm_game)
+    ar = cusub.add_parser("add-redirect", help="Add a restore path redirect")
+    ar.add_argument("source")
+    ar.add_argument("target")
+    ar.set_defaults(func=cmd_custom_add_redirect)
+    ai = cusub.add_parser("add-ignore", help="Add a backup ignore glob")
+    ai.add_argument("pattern")
+    ai.set_defaults(func=cmd_custom_add_ignore)
+    rr = cusub.add_parser("rm-redirect", help="Remove a redirect by index")
+    rr.add_argument("index", type=int)
+    rr.set_defaults(func=cmd_custom_rm, what="redirect")
+    ri = cusub.add_parser("rm-ignore", help="Remove an ignore by index")
+    ri.add_argument("index", type=int)
+    ri.set_defaults(func=cmd_custom_rm, what="ignore")
     return p
 
 
