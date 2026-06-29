@@ -9,13 +9,32 @@ selected. Tabs share one server connection:
 
 Operations run on a worker thread so the window stays responsive; output streams
 to a log box and a progress bar. Tkinter is stdlib, so this bundles into the exe.
+
+The look is modernised with the Sun Valley (Windows 11 Fluent) ttk theme plus
+Segoe UI and per-process DPI awareness; a View menu toggles light/dark (defaulting
+to the OS setting). All of that degrades gracefully if ``sv_ttk``/``darkdetect``
+aren't installed.
 """
 from __future__ import annotations
 
+import os
 import queue
 import threading
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
+import tkinter.font as tkfont
+
+# Optional, for a modern Windows 11 (Fluent) look. Both are pure-Python and
+# bundled into the packaged exe; when absent (source install without them) the
+# GUI still runs, just with the default Tk theme.
+try:
+    import sv_ttk  # Sun Valley ttk theme (Win11 light/dark)
+except Exception:  # noqa: BLE001
+    sv_ttk = None
+try:
+    import darkdetect  # follow the OS light/dark setting
+except Exception:  # noqa: BLE001
+    darkdetect = None
 
 from .api import ApiClient
 from .backup import detect_env, run_backup
@@ -205,14 +224,21 @@ class App:
         self.root = root
         updater.cleanup_old()  # clear any leftover *.old from a prior self-update
         root.title(f"luduclone {__version__}")
-        root.geometry("780x640")
-        root.minsize(660, 520)
+        # Scale the window to the display DPI so it isn't tiny on a HiDPI/scaled
+        # monitor once per-process DPI awareness is on (see main()).
+        scale = max(1.0, root.winfo_fpixels("1i") / 96.0)
+        root.geometry(f"{int(800 * scale)}x{int(660 * scale)}")
+        root.minsize(int(680 * scale), int(540 * scale))
 
         self._log_q: queue.Queue[str] = queue.Queue()
         self._busy = False
         self._prog: tuple[int, int, str] | None = None
         self._remote_games: list[dict] = []
         self._buttons: list[ttk.Button] = []
+        self._classic_widgets: list[tk.Widget] = []   # tk.Text/Listbox to recolor
+        self.theme_var = tk.StringVar(
+            value=(darkdetect.theme().lower() if darkdetect and darkdetect.theme()
+                   else "light"))
 
         server, token, retain = "", "", 0
         try:
@@ -238,7 +264,15 @@ class App:
     def _build(self, root: tk.Tk) -> None:
         pad = {"padx": 8, "pady": 4}
 
+        self._init_fonts()
+
         menubar = tk.Menu(root)
+        viewm = tk.Menu(menubar, tearoff=0)
+        viewm.add_radiobutton(label="Light", value="light", variable=self.theme_var,
+                              command=lambda: self._set_theme("light"))
+        viewm.add_radiobutton(label="Dark", value="dark", variable=self.theme_var,
+                              command=lambda: self._set_theme("dark"))
+        menubar.add_cascade(label="View", menu=viewm)
         helpm = tk.Menu(menubar, tearoff=0)
         helpm.add_command(label="Check for updates…", command=self.on_check_updates)
         helpm.add_command(label="About", command=self.on_about)
@@ -270,11 +304,49 @@ class App:
         self.prog_label = ttk.Label(prog, text="", width=26, anchor="w")
         self.prog_label.pack(side="left", padx=8)
 
-        self.log = tk.Text(root, height=7, wrap="word", state="disabled")
+        self.log = tk.Text(root, height=7, wrap="word", state="disabled",
+                           relief="flat", borderwidth=8)
         self.log.pack(fill="both", expand=False, padx=8, pady=(0, 4))
+        self._classic_widgets.append(self.log)
 
-        self.status = ttk.Label(root, text="Ready", anchor="w", relief="sunken")
+        self.status = ttk.Label(root, text="Ready", anchor="w", padding=(8, 4))
         self.status.pack(fill="x", side="bottom")
+
+        self._set_theme(self.theme_var.get())   # applies sv-ttk + classic colors
+
+    # ---- look & feel ---------------------------------------------------
+    def _init_fonts(self) -> None:
+        """Use Segoe UI (the Windows system font) across stock + ttk widgets."""
+        family = "Segoe UI" if os.name == "nt" else "TkDefaultFont"
+        for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
+            try:
+                f = tkfont.nametofont(name)
+                if os.name == "nt":
+                    f.configure(family=family, size=10)
+            except tk.TclError:
+                pass
+
+    def _set_theme(self, name: str) -> None:
+        """Apply the Sun Valley (Win11) theme and recolor the stock tk widgets
+        (Text/Listbox), which ttk themes don't reach, to match."""
+        if sv_ttk is not None:
+            try:
+                sv_ttk.set_theme(name)
+            except tk.TclError:
+                pass
+        dark = name == "dark"
+        bg = "#1c1c1c" if dark else "#ffffff"
+        fg = "#e6e6e6" if dark else "#1a1a1a"
+        sel = "#2f5d8c" if dark else "#cfe3ff"
+        for w in self._classic_widgets:
+            try:
+                w.configure(background=bg, foreground=fg, highlightthickness=0,
+                            selectbackground=sel,
+                            selectforeground=("#ffffff" if dark else "#000000"))
+                if isinstance(w, tk.Text):
+                    w.configure(insertbackground=fg)
+            except tk.TclError:
+                pass
 
     def _backup_tab(self, nb) -> ttk.Frame:
         f = ttk.Frame(nb)
@@ -330,7 +402,8 @@ class App:
 
         gframe = ttk.LabelFrame(f, text="Custom games (extra/overriding manifest)")
         gframe.pack(fill="both", expand=True, padx=4, pady=4)
-        self.cg_list = tk.Listbox(gframe, height=6)
+        self.cg_list = tk.Listbox(gframe, height=6, relief="flat", borderwidth=6,
+                                  activestyle="none")
         self.cg_list.pack(side="left", fill="both", expand=True, padx=4, pady=4)
         gb = ttk.Frame(gframe)
         gb.pack(side="left", fill="y", padx=4)
@@ -339,7 +412,8 @@ class App:
 
         rframe = ttk.LabelFrame(f, text="Restore redirects (source path → target path)")
         rframe.pack(fill="both", expand=True, padx=4, pady=4)
-        self.rd_list = tk.Listbox(rframe, height=4)
+        self.rd_list = tk.Listbox(rframe, height=4, relief="flat", borderwidth=6,
+                                  activestyle="none")
         self.rd_list.pack(side="left", fill="both", expand=True, padx=4, pady=4)
         rb = ttk.Frame(rframe)
         rb.pack(side="left", fill="y", padx=4)
@@ -348,13 +422,15 @@ class App:
 
         iframe = ttk.LabelFrame(f, text="Backup ignore globs (e.g. */cache/*, *.tmp)")
         iframe.pack(fill="both", expand=True, padx=4, pady=4)
-        self.ig_list = tk.Listbox(iframe, height=4)
+        self.ig_list = tk.Listbox(iframe, height=4, relief="flat", borderwidth=6,
+                                  activestyle="none")
         self.ig_list.pack(side="left", fill="both", expand=True, padx=4, pady=4)
         ib = ttk.Frame(iframe)
         ib.pack(side="left", fill="y", padx=4)
         ttk.Button(ib, text="Add…", command=self.on_add_ignore).pack(fill="x")
         ttk.Button(ib, text="Remove", command=self.on_rm_ignore).pack(fill="x", pady=2)
 
+        self._classic_widgets += [self.cg_list, self.rd_list, self.ig_list]
         self._refresh_custom_lists()
         return f
 
@@ -818,7 +894,24 @@ def _fmt_time(epoch) -> str:
     return datetime.datetime.fromtimestamp(epoch).strftime("%Y-%m-%d %H:%M")
 
 
+def _enable_hidpi() -> None:
+    """Tell Windows this process is DPI-aware so Tk renders crisp (not bitmap-
+    stretched/blurry) text on scaled displays. No-op off Windows / on failure."""
+    if os.name != "nt":
+        return
+    try:
+        from ctypes import windll
+        windll.shcore.SetProcessDpiAwareness(1)   # system DPI aware
+    except Exception:  # noqa: BLE001
+        try:
+            from ctypes import windll
+            windll.user32.SetProcessDPIAware()
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def main() -> int:
+    _enable_hidpi()
     root = tk.Tk()
     App(root)
     root.mainloop()

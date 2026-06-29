@@ -20,9 +20,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      # The client only needs requests + pyyaml at runtime; keep the exe lean.
+      # requests + pyyaml at runtime; sv-ttk + darkdetect give the GUI a modern
+      # Windows 11 (Fluent) look and OS light/dark following.
       - name: Install build deps
-        run: pip install requests PyYAML pyinstaller
+        run: pip install requests PyYAML sv-ttk darkdetect pyinstaller
 
       - name: Build luduclone.exe (CLI)
         run: >
@@ -34,6 +35,7 @@ jobs:
         run: >
           pyinstaller --onefile --windowed --name luduclone-gui
           --collect-submodules client --collect-submodules shared
+          --collect-all sv_ttk
           luduclone_gui.py
 
       - name: Sanity check the CLI exe

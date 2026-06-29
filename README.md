@@ -121,6 +121,11 @@ Prefer a window over the terminal? Run the GUI:
 python -m client.gui        # or just run luduclone-gui.exe
 ```
 
+The GUI uses a modern Windows 11 (Fluent) look via the Sun Valley theme, Segoe
+UI, and DPI-aware (crisp) rendering, with a **View** menu to switch light/dark
+(defaults to your Windows setting). From source, `pip install sv-ttk darkdetect`
+for the themed look; without them it falls back to the default Tk theme.
+
 Like ludusavi, each tab is a searchable, checkable game list with an expandable
 file tree (per save entry, with sizes) and a running summary of what's selected.
 Three tabs share one server connection:
