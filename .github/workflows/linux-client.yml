@@ -1,0 +1,50 @@
+name: linux-client
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write  # needed to attach the binary to releases on tag pushes
+
+jobs:
+  build:
+    # Build on an older glibc so the binary runs on SteamOS / Steam Deck and
+    # other current distros (glibc is forward-compatible, not backward).
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The CLI client only needs requests + pyyaml at runtime; keep it lean.
+      - name: Install build deps
+        run: pip install requests PyYAML pyinstaller
+
+      # CLI only: the Tkinter GUI is impractical on SteamOS (no system _tkinter),
+      # and the Deck workflow is restore-from-CLI. Name the asset `luduclone`
+      # (no extension) so the self-updater matches it via sys.executable name.
+      - name: Build luduclone (Linux CLI)
+        run: >
+          pyinstaller --onefile --console --name luduclone
+          --collect-submodules client --collect-submodules shared
+          luduclone.py
+
+      - name: Sanity check the binary
+        run: ./dist/luduclone --version && ./dist/luduclone --help
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: luduclone-linux
+          path: dist/luduclone
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/luduclone

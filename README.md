@@ -8,10 +8,12 @@ Self-hosted game-save sync, **Windows → Linux**, built on the
 [ludusavi manifest](https://github.com/mtkennerly/ludusavi-manifest).
 
 > **Prebuilt artifacts:** CI publishes the server image to
-> `ghcr.io/rangodj/luduclone:latest` and builds `luduclone.exe` (CLI) +
-> `luduclone-gui.exe` (GUI) — download from the latest
-> [windows-client run](https://github.com/rangoDJ/luduclone/actions/workflows/windows-client.yml),
-> or from tagged releases.
+> `ghcr.io/rangodj/luduclone:latest`, builds `luduclone.exe` (CLI) +
+> `luduclone-gui.exe` (GUI) for Windows, and a single-file `luduclone` binary for
+> Linux / **SteamOS (Steam Deck)** — download from the latest
+> [windows-client](https://github.com/rangoDJ/luduclone/actions/workflows/windows-client.yml)
+> / [linux-client](https://github.com/rangoDJ/luduclone/actions/workflows/linux-client.yml)
+> run, or from tagged releases.
 
 A Docker-based server is the hub; thin clients on each OS back up saves locally,
 upload them, and download them on the other machine for restore. Windows-only
@@ -156,6 +158,22 @@ reports the available version (use `git pull`).
 
 For Windows games run through Proton, the client injects your saves into the
 game's compatibility prefix (`steamapps/compatdata/<appid>/pfx/...`).
+
+**Easiest on a Steam Deck — grab the prebuilt binary** (Desktop Mode → Konsole):
+
+```bash
+cd ~ && curl -L -o luduclone \
+  https://github.com/rangoDJ/luduclone/releases/latest/download/luduclone
+chmod +x luduclone                     # release assets don't keep the +x bit
+./luduclone configure --server http://your-nas:8000 --token secret
+./luduclone prefixes                   # sanity check: detected libs + prefixes
+./luduclone restore --preview          # per-file diff, writes nothing
+./luduclone restore                    # restore everything backed up
+```
+
+`~` survives SteamOS updates, and the binary self-updates (`./luduclone update
+--apply`). No Python/venv needed. The commands below use the from-source form
+(`python -m client …`); with the binary, substitute `./luduclone …`.
 
 ```bash
 python -m client configure --server http://your-nas:8000 --token secret
