@@ -80,19 +80,21 @@ class GameList(ttk.Frame):
         ttk.Button(bar, text="None", width=5,
                    command=lambda: self._set_all(False)).pack(side="left", padx=(2, 0))
 
+        # The leading tree column (#0) is the checkbox; the game name and the
+        # caller's columns follow. This puts the tick at the far left (ludusavi).
         keys = [c[0] for c in columns]
-        self.tree = ttk.Treeview(self, columns=("check", *keys),
+        self.tree = ttk.Treeview(self, columns=("name", *keys),
                                  show="tree headings", selectmode="none")
-        self.tree.heading("#0", text="Game",
-                          command=lambda: self._sort_by("#0", False))
-        self.tree.column("#0", width=300, anchor="w")
-        self.tree.heading("check", text=CHECKED,
+        self.tree.heading("#0", text="",
                           command=lambda: self._set_all(self._mostly_unchecked()))
-        self.tree.column("check", width=34, anchor="center", stretch=False)
+        self.tree.column("#0", width=54, minwidth=54, anchor="w", stretch=False)
+        self.tree.heading("name", text="Game",
+                          command=lambda: self._sort_by("name", False))
+        self.tree.column("name", width=300, anchor="w")
         for key, heading, width, anchor, numeric in columns:
             self.tree.heading(key, text=heading,
                               command=lambda k=key, n=numeric: self._sort_by(k, n))
-            self.tree.column(key, width=width, anchor=anchor)
+            self.tree.column(key, width=width, anchor=anchor, stretch=False)
 
         vsb = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=vsb.set)
@@ -112,7 +114,7 @@ class GameList(ttk.Frame):
         """Add one game row. ``children`` is a (possibly nested) list of
         ``{"text": str, "values": tuple, "children": [...]}`` detail rows."""
         glyph = CHECKED if checked else UNCHECKED
-        self.tree.insert("", "end", iid=name, text=name, values=(glyph, *values))
+        self.tree.insert("", "end", iid=name, text=glyph, values=(name, *values))
         if checked:
             self.checked.add(name)
         self.meta[name] = meta or {}
@@ -130,10 +132,12 @@ class GameList(ttk.Frame):
         self.tree.item(name, open=True)
 
     def _add_child(self, parent_iid: str, node: dict) -> None:
+        # Children have no checkbox (#0 empty); their label goes in the name
+        # column so it lines up under the game, indented by the tree.
         pad = ("",) * len(self._cols)
         vals = node.get("values") or pad
-        iid = self.tree.insert(parent_iid, "end", text=node.get("text", ""),
-                               values=("", *vals))
+        iid = self.tree.insert(parent_iid, "end", text="",
+                               values=(node.get("text", ""), *vals))
         for sub in node.get("children") or []:
             self._add_child(iid, sub)
 
@@ -143,13 +147,14 @@ class GameList(ttk.Frame):
 
     # ---- checkbox handling --------------------------------------------
     def _on_click(self, event) -> None:
-        region = self.tree.identify_region(event.x, event.y)
-        if region != "cell":
-            return
-        if self.tree.identify_column(event.x) != "#1":   # the check column
+        # The checkbox lives in the tree column (#0); a click there toggles the
+        # game, except on the expand/collapse triangle (the "indicator" element).
+        if self.tree.identify_column(event.x) != "#0":
             return
         iid = self.tree.identify_row(event.y)
         if not iid or self.tree.parent(iid):             # only top-level games
+            return
+        if "indicator" in str(self.tree.identify_element(event.x, event.y)):
             return
         self._toggle(iid)
 
@@ -160,9 +165,7 @@ class GameList(ttk.Frame):
         else:
             self.checked.add(iid)
             glyph = CHECKED
-        vals = list(self.tree.item(iid, "values"))
-        vals[0] = glyph
-        self.tree.item(iid, values=vals)
+        self.tree.item(iid, text=glyph)
         self._fire()
 
     def _set_all(self, on: bool) -> None:
@@ -201,8 +204,6 @@ class GameList(ttk.Frame):
         items = list(self.tree.get_children())
 
         def keyfn(iid):
-            if col == "#0":
-                return self.tree.item(iid, "text").lower()
             raw = self.meta.get(iid, {}).get(f"sort_{col}")
             if raw is None:
                 raw = self.tree.set(iid, col)
@@ -278,6 +279,7 @@ class App:
         helpm.add_command(label="About", command=self.on_about)
         menubar.add_cascade(label="Help", menu=helpm)
         root.config(menu=menubar)
+        self._menus = [menubar, viewm, helpm]
 
         top = ttk.Frame(root)
         top.pack(fill="x", **pad)
@@ -297,16 +299,19 @@ class App:
         nb.add(self._restore_tab(nb), text="Restore")
         nb.add(self._custom_tab(nb), text="Custom")
 
-        prog = ttk.Frame(root)
-        prog.pack(fill="x", **pad)
-        self.progress = ttk.Progressbar(prog, mode="determinate", maximum=100)
-        self.progress.pack(side="left", fill="x", expand=True)
-        self.prog_label = ttk.Label(prog, text="", width=26, anchor="w")
-        self.prog_label.pack(side="left", padx=8)
+        ttk.Separator(root, orient="horizontal").pack(fill="x", padx=8, pady=(2, 0))
 
-        self.log = tk.Text(root, height=7, wrap="word", state="disabled",
-                           relief="flat", borderwidth=8)
-        self.log.pack(fill="both", expand=False, padx=8, pady=(0, 4))
+        prog = ttk.Frame(root)
+        prog.pack(fill="x", padx=8, pady=4)
+        ttk.Label(prog, text="Activity").pack(side="left")
+        self.progress = ttk.Progressbar(prog, mode="determinate", maximum=100)
+        self.progress.pack(side="left", fill="x", expand=True, padx=8)
+        self.prog_label = ttk.Label(prog, text="", width=26, anchor="e")
+        self.prog_label.pack(side="left")
+
+        self.log = tk.Text(root, height=5, wrap="word", state="disabled",
+                           relief="flat", borderwidth=8, highlightthickness=0)
+        self.log.pack(fill="x", expand=False, padx=8, pady=(0, 4))
         self._classic_widgets.append(self.log)
 
         self.status = ttk.Label(root, text="Ready", anchor="w", padding=(8, 4))
@@ -347,6 +352,35 @@ class App:
                     w.configure(insertbackground=fg)
             except tk.TclError:
                 pass
+        # Stock tk menus aren't reached by the ttk theme; colour them to match.
+        menu_bg = "#2b2b2b" if dark else "#f3f3f3"
+        for m in getattr(self, "_menus", []):
+            try:
+                m.configure(background=menu_bg, foreground=fg,
+                            activebackground=sel, activeforeground=fg,
+                            borderwidth=0)
+            except tk.TclError:
+                pass
+        self._apply_titlebar(dark)
+
+    def _apply_titlebar(self, dark: bool) -> None:
+        """Match the Windows title bar to the theme (Win10 2004+/Win11)."""
+        if os.name != "nt":
+            return
+        try:
+            from ctypes import windll, byref, c_int, sizeof
+            self.root.update_idletasks()
+            hwnd = windll.user32.GetParent(self.root.winfo_id())
+            val = c_int(1 if dark else 0)
+            for attr in (20, 19):   # DWMWA_USE_IMMERSIVE_DARK_MODE (new, then old)
+                windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, byref(val), sizeof(val))
+            # Nudge a repaint of the caption, but only once the window is on
+            # screen (during initial build it isn't mapped yet).
+            if self.root.winfo_ismapped():
+                self.root.withdraw()
+                self.root.deiconify()
+        except Exception:  # noqa: BLE001
+            pass
 
     def _backup_tab(self, nb) -> ttk.Frame:
         f = ttk.Frame(nb)
